@@ -85,9 +85,7 @@ internal sealed class MainForm : Form
         entry.Controls.Add(find, 2, 0);
         entry.Controls.Add(cancel, 3, 0);
 
-        results.Columns.Add("Station", 300);
-        results.Columns.Add("Format", 125);
-        results.Columns.Add("Bitrate", 110);
+        results.Columns.Add("Stream", 560);
         results.SelectedIndexChanged += (_, _) => UpdateSelection();
         results.Command += command =>
         {
@@ -99,7 +97,8 @@ internal sealed class MainForm : Form
                 case StreamAction.OpenDefault: OpenInDefaultPlayer(); break;
             }
         };
-        results.Resize += (_, _) => results.Columns[0].Width = Math.Max(145, results.ClientSize.Width - 255);
+        results.Resize += (_, _) => results.Columns[0].Width =
+            Math.Max(145, results.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 4);
 
         var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new(12) };
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -184,9 +183,7 @@ internal sealed class MainForm : Form
                 var names = DisplayNames(found.Stations);
                 for (int i = 0; i < found.Stations.Count; i++)
                 {
-                    var station = found.Stations[i];
-                    results.Items.Add(new ListViewItem([names[i], station.Format, station.Bitrate is int b ? b + " kbps" : ""])
-                    { Tag = station });
+                    results.Items.Add(ResultRow(found.Stations[i], names[i]));
                 }
                 if (results.Items.Count != 0)
                 {
@@ -334,6 +331,10 @@ internal sealed class MainForm : Form
         return stations.Select(s => duplicates.Contains((s.Name, s.Format, s.Bitrate))
             ? $"{s.Name} ({s.Url.IdnHost}{s.Url.AbsolutePath})" : s.Name).ToArray();
     }
+
+    private static ListViewItem ResultRow(Station station, string name) =>
+        new(name + ", " + station.Format + (station.Bitrate is int bitrate ? $", {bitrate} kbps" : ""))
+        { Tag = station };
 
     private void UpdateSelection()
     {
@@ -516,7 +517,9 @@ internal sealed class MainForm : Form
             DisplayNames([a]) is ["Theme"];
         ok &= !results.TabStop && !details.TabStop && status.TabStop;
         _ = results.Handle;
-        var row = results.Items.Add(new ListViewItem(a.Name) { Tag = a });
+        var row = results.Items.Add(ResultRow(a, a.Name));
+        ok &= results.Columns.Count == 1 && row.SubItems.Count == 1 && row.Text == "Theme, MP3, 192 kbps" &&
+            ResultRow(a with { Bitrate = null }, a.Name).Text == "Theme, MP3";
         row.Selected = true;
         UpdateSelection();
         ok &= results.TabStop && details.TabStop;

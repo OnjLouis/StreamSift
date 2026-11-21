@@ -34,6 +34,8 @@ func selfTest() throws {
         _ = try Playlist.data(bad)
         throw UpdateFailure.invalid("Accepted a file URL")
     } catch StreamError.playlist {}
+    try require(row.listLabel(named: "Test Station") == "Test Station, MP3, 320 kbps" &&
+                bad.listLabel(named: "No Bitrate") == "No Bitrate, MP3", "Station, codec and available bitrate share one result")
 
     let json = #"{"tag_name":"v1.0.1","draft":false,"prerelease":false,"assets":[{"name":"StreamSift-1.0.1-macOS.zip","size":1000,"browser_download_url":"https://github.com/OnjLouis/StreamSift/releases/download/v1.0.1/StreamSift-1.0.1-macOS.zip"}]}"#
     let release = try JSONDecoder().decode(Updater.GitHubRelease.self, from: Data(json.utf8))

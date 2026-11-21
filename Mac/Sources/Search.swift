@@ -6,6 +6,10 @@ struct Station: Decodable {
     let format: String
     let bitrate: Int?
     let foundOn: String
+
+    func listLabel(named displayName: String) -> String {
+        [displayName, format, bitrate.map { "\($0) kbps" }].compactMap { $0 }.joined(separator: ", ")
+    }
 }
 
 struct SearchResult: Decodable {

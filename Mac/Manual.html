@@ -31,15 +31,16 @@ dd { margin-bottom: .5rem; }
 <h2 id="find">Find a stream</h2>
 <p>StreamSift runs on Intel and Apple Silicon Macs with macOS 13 or later. Unzip the download, then move StreamSift to Applications.</p>
 <p>Paste a station website, a player page, a playlist address or a direct stream URL, and press Return. StreamSift follows likely listening links and checks the audio it finds. M3U, PLS and XSPF files are lists of addresses: StreamSift shows the verified streams inside them, not one result per playlist file. Several entries can be different qualities or formats of the same station.</p>
-<p>When results are ready, focus moves to the first stream unless you moved away from the search controls. Use the arrow keys in the Streams list, then Tab to Stream details for the full address and the page or playlist it came from. If no stream is found, try the station's dedicated Listen Live or How to Listen page. Press Escape to cancel a search.</p>
+<p>When results are ready, focus moves to the first stream unless you moved away from the search controls. Use the arrow keys in the Streams list to read each station's name, audio format and bitrate when known. Tab to Stream details for the full address and the page or playlist it came from. If no stream is found, try the station's dedicated Listen Live or How to Listen page. Press Escape to cancel a search.</p>
 <p>StreamSift plays a short sound when a search starts and another when it finishes, including when nothing is found. Status announcements still work when sounds are off.</p>
 <h2 id="listen">Use a stream</h2>
 <ul>
-<li><strong>Copy stream address:</strong> Paste the direct URL into a player that supports web streams.</li>
+<li><strong>Copy stream address:</strong> Paste the URL into your player's own command for opening a URL or network stream. It is not a StreamSift setting.</li>
 <li><strong>Save playlist:</strong> Choose a file name and location for the selected stream's M3U8 playlist. The dialog starts in the playlist folder from Settings.</li>
 <li><strong>Open in default player:</strong> Save the selected stream in the playlist folder without asking for a name, then open it with the Mac app associated with <code>.m3u8</code> files. Existing playlists are not overwritten. If macOS cannot open the file, the playlist stays saved.</li>
 
 </ul>
+<p>To change which player Shift+Return opens, select an <code>.m3u8</code> file in Finder, choose File, Get Info, select the player under Open with, and choose Change All. There is no player selector in StreamSift Settings.</p>
 <h2 id="preferences">Settings</h2>
 <p>Choose StreamSift, Settings or press Command+,.</p>
 <p>On the General tab, turn search sounds on or off, or choose the playlist folder. The default is the <code>StreamSift</code> folder inside Music. The folder is created when you first save a playlist there.</p>

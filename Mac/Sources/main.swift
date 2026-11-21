@@ -85,14 +85,12 @@ import UniformTypeIdentifiers
         table.allowsMultipleSelection = false
         table.allowsEmptySelection = false
         table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
-        for (name, width) in [("Station", 430.0), ("Format", 100.0), ("Bitrate", 100.0)] {
-            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(name))
-            column.title = name
-            column.width = width
-            column.minWidth = 65
-            column.resizingMask = name == "Station" ? [.autoresizingMask, .userResizingMask] : [.userResizingMask]
-            table.addTableColumn(column)
-        }
+        let streamColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("Stream"))
+        streamColumn.title = "Stream"
+        streamColumn.width = 630
+        streamColumn.minWidth = 140
+        streamColumn.resizingMask = [.autoresizingMask, .userResizingMask]
+        table.addTableColumn(streamColumn)
         table.target = self
         table.doubleAction = #selector(openDefaultPlayer)
         table.copyAddress = { [weak self] in self?.copyAddress() }
@@ -205,14 +203,10 @@ import UniformTypeIdentifiers
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard stations.indices.contains(row) else { return nil }
-        let text: String
-        switch tableColumn?.identifier.rawValue {
-        case "Station": text = names[row]
-        case "Format": text = stations[row].format
-        default: text = stations[row].bitrate.map { "\($0) kbps" } ?? ""
-        }
+        let text = stations[row].listLabel(named: names[row])
         let cell = NSTextField(labelWithString: text)
-        cell.lineBreakMode = .byTruncatingTail
+        cell.lineBreakMode = .byTruncatingMiddle
+        cell.toolTip = text
         return cell
     }
 

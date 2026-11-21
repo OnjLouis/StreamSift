@@ -31,15 +31,16 @@ dd { margin-bottom: .5rem; }
 <h2 id="find">Find a stream</h2>
 <p>StreamSift runs on Windows 10 or 11, 64-bit. Install the <a href="https://dotnet.microsoft.com/en-us/download/dotnet/10.0">.NET 10 Desktop Runtime (x64)</a> if it is not already installed. Extract the StreamSift ZIP into its own folder and open StreamSift.exe.</p>
 <p>Paste a station website, a player page, a playlist address or a direct stream URL, and press Enter. StreamSift follows likely listening links and checks the audio it finds. M3U, PLS and XSPF files are lists of addresses: StreamSift shows the verified streams inside them, not one result per playlist file. Several entries can be different qualities or formats of the same station.</p>
-<p>When results are ready, focus moves to the first stream unless you moved away from the search controls. Use the arrow keys in the Streams list, then Tab to Stream details for the full address and the page or playlist it came from. If no stream is found, try the station's dedicated Listen Live or How to Listen page. Press Escape to cancel a search.</p>
+<p>When results are ready, focus moves to the first stream unless you moved away from the search controls. Use the arrow keys in the Streams list to read each station's name, audio format and bitrate when known. Tab to Stream details for the full address and the page or playlist it came from. If no stream is found, try the station's dedicated Listen Live or How to Listen page. Press Escape to cancel a search.</p>
 <p>StreamSift plays a short sound when a search starts and another when it finishes, including when nothing is found. Status announcements still work when sounds are off.</p>
 <h2 id="listen">Use a stream</h2>
 <ul>
-<li><strong>Copy stream address:</strong> Paste the direct URL into your player. In foobar2000, use File, Add Location.</li>
+<li><strong>Copy stream address:</strong> Paste the URL into your player's own command for opening a URL or network stream. In Foobar2000, that is File, Add Location. It is not a StreamSift setting.</li>
 <li><strong>Save playlist:</strong> Choose a file name and location for the selected stream's M3U8 playlist. The dialog starts in the playlist folder from Preferences.</li>
 <li><strong>Open in default player:</strong> Save the selected stream in the playlist folder without asking for a name, then open it with the Windows app associated with <code>.m3u8</code> files. Existing playlists are not overwritten. If Windows cannot open the file, the playlist stays saved.</li>
-<li><strong>Add to Foobar2000:</strong> Send the selected stream to Foobar2000 without asking it to start playback. Foobar2000 chooses the destination using its incoming-file settings. This command looks for an installed copy in Program Files. For a portable copy, use Add Location or import the saved playlist.</li>
+<li><strong>Add to Foobar2000:</strong> Send the selected stream to Foobar2000 without asking it to start playback. Foobar2000 chooses the destination using its incoming-file settings. This command looks for an installed copy in Program Files. For a portable copy, open the saved playlist in Foobar2000 or use its File, Add Location command.</li>
 </ul>
+<p>To change which player Shift+Enter opens, choose the default app for <code>.m3u8</code> in Windows Settings, Apps, Default apps. There is no player selector in StreamSift Preferences.</p>
 <h2 id="preferences">Preferences</h2>
 <p>Choose Options, Preferences or press Ctrl+,.</p>
 <p>On the General tab, turn search sounds on or off, or choose the playlist folder. The default is <code>User\Playlists</code> beside StreamSift. The folder is created when you first save a playlist there.</p>
