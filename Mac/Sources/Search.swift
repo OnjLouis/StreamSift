@@ -27,14 +27,45 @@ struct SearchResult: Decodable {
 }
 
 enum StreamError: LocalizedError {
-    case invalidAddress, search, playlist, tooManyNames
+    case invalidAddress, search, browserRequired, browserSearch, directorySearch, playlist, tooManyNames
 
     var errorDescription: String? {
         switch self {
         case .invalidAddress: return "Enter a public HTTP or HTTPS address."
         case .search: return "Search could not finish. Try the station's player page."
+        case .browserRequired: return "Find with Browser requires Chrome or Microsoft Edge."
+        case .browserSearch: return "Browser-assisted search could not finish."
+        case .directorySearch: return "Public directory lookup could not finish."
         case .playlist: return "The stream does not have a public HTTP or HTTPS address."
         case .tooManyNames: return "There are too many playlists with that name in the selected folder."
+        }
+    }
+}
+
+enum SearchMode: String {
+    case passive = "--json", browser = "--browser-json", directory = "--directory-json"
+
+    var starting: String {
+        switch self {
+        case .passive: return "Searching..."
+        case .browser: return "Searching with a temporary browser..."
+        case .directory: return "Checking the public radio directory..."
+        }
+    }
+
+    var failure: StreamError {
+        switch self {
+        case .passive: return .search
+        case .browser: return .browserSearch
+        case .directory: return .directorySearch
+        }
+    }
+
+    var resultPrefix: String {
+        switch self {
+        case .passive: return ""
+        case .browser: return "Browser-assisted search: "
+        case .directory: return "Public directory: "
         }
     }
 }
@@ -42,14 +73,15 @@ enum StreamError: LocalizedError {
 final class ScanJob {
     private let process = Process()
 
-    func start(_ address: String, completed: @escaping (Result<SearchResult, Error>) -> Void) throws {
+    func start(_ address: String, mode: SearchMode = .passive,
+               completed: @escaping (Result<SearchResult, Error>) -> Void) throws {
         guard !address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               address.utf16.count <= 4096, !address.contains("\0") else { throw StreamError.invalidAddress }
         guard let scanner = Bundle.main.url(forAuxiliaryExecutable: "Scanner") else { throw StreamError.search }
         let output = Pipe()
         let input = Pipe()
         process.executableURL = scanner
-        process.arguments = ["--json"]
+        process.arguments = [mode.rawValue]
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         process.standardInput = input
@@ -68,7 +100,10 @@ final class ScanJob {
             process.waitUntilExit()
             let result = Result {
                 if process.terminationStatus == 3 { throw StreamError.invalidAddress }
-                guard process.terminationStatus == 0, data.count <= 8 * 1024 * 1024 else { throw StreamError.search }
+                if process.terminationStatus == 4 { throw StreamError.browserRequired }
+                guard process.terminationStatus == 0, data.count <= 8 * 1024 * 1024 else {
+                    throw mode.failure
+                }
                 return try JSONDecoder().decode(SearchResult.self, from: data)
             }
             DispatchQueue.main.async { completed(result) }

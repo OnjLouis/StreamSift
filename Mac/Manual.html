@@ -26,6 +26,13 @@ dd { margin-bottom: .5rem; }
 </ul>
 </nav>
 <h2 id="changes">Version history</h2>
+<h3>1.1.0</h3>
+<ul>
+<li>Improved discovery on station homepages and player pages, including Radio Nova and Sveriges Radio. Individual public Radio Garden station pages are now supported where playback is available.</li>
+<li>Added an optional browser-assisted search for sites that expose audio only when their web player starts.</li>
+<li>Added a separate public-directory lookup that verifies streams before listing them.</li>
+<li>Added a File menu shortcut to open the configured playlist folder.</li>
+</ul>
 <h3>1.0.0</h3>
 <p>Initial release for Windows and Mac. Find and verify live streams, copy their addresses, and save or open them in a player.</p>
 <h2 id="find">Find a stream</h2>
@@ -33,17 +40,20 @@ dd { margin-bottom: .5rem; }
 <p>Paste a station website, a player page, a playlist address or a direct stream URL, and press Return. StreamSift follows likely listening links and checks the audio it finds. M3U, PLS and XSPF files are lists of addresses: StreamSift shows the verified streams inside them, not one result per playlist file. Several entries can be different qualities or formats of the same station.</p>
 <p>When results are ready, focus moves to the first stream unless you moved away from the search controls. Use the arrow keys in the Streams list to read each station's name, audio format and bitrate when known. Tab to Stream details for the full address and the page or playlist it came from. If no stream is found, try the station's dedicated Listen Live or How to Listen page. Press Escape to cancel a search.</p>
 <p>StreamSift plays a short sound when a search starts and another when it finishes, including when nothing is found. Status announcements still work when sounds are off.</p>
+<p>If the site only exposes the stream after starting its web player, try the <strong>Find with Browser</strong> button or press Command+Shift+Return. The command is also in Actions. This optional search requires Google Chrome or Microsoft Edge. It uses a temporary, muted browser session and verifies whether the media it sees can be opened independently.</p>
+<p><strong>Actions &gt; Look Up in Public Directory</strong> (Command+Shift+D) checks the Radio Browser directory for the website and verifies matching stream addresses. The first lookup downloads a public catalogue, which is cached for up to a day. A channel page only matches entries for that page. To look for other stations on the same network, enter its homepage instead. Directory entries can be out of date.</p>
 <h2 id="listen">Use a stream</h2>
 <ul>
 <li><strong>Copy stream address:</strong> Paste the URL into your player's own command for opening a URL or network stream. It is not a StreamSift setting.</li>
 <li><strong>Save playlist:</strong> Choose a file name and location for the selected stream's M3U8 playlist. The dialog starts in the playlist folder from Settings.</li>
+<li><strong>Open playlist folder:</strong> Open the configured folder in Finder. If it does not exist yet, StreamSift creates it.</li>
 <li><strong>Open in default player:</strong> Save the selected stream in the playlist folder without asking for a name, then open it with the Mac app associated with <code>.m3u8</code> files. Existing playlists are not overwritten. If macOS cannot open the file, the playlist stays saved.</li>
 
 </ul>
 <p>To change which player Shift+Return opens, select an <code>.m3u8</code> file in Finder, choose File, Get Info, select the player under Open with, and choose Change All. There is no player selector in StreamSift Settings.</p>
 <h2 id="preferences">Settings</h2>
 <p>Choose StreamSift, Settings or press Command+,.</p>
-<p>On the General tab, turn search sounds on or off, or choose the playlist folder. The default is the <code>StreamSift</code> folder inside Music. The folder is created when you first save a playlist there.</p>
+<p>On the General tab, turn search sounds on or off, or choose the playlist folder. The default is the <code>StreamSift</code> folder inside Music. The folder is created when you first open it from StreamSift or save a playlist there.</p>
 <p>On the Updates tab, turn on Check for updates at startup to receive a notice when a newer version is available. This is off by default and does not install anything automatically.</p>
 <h2 id="keys">Keyboard shortcuts</h2>
 <dl>
@@ -54,8 +64,11 @@ dd { margin-bottom: .5rem; }
 <dt>Command+C in Streams</dt><dd>Copy the selected stream address. In an edit field, Command+C copies selected text as usual.</dd>
 <dt>Command+S</dt><dd>Save a playlist for the selected stream.</dd>
 <dt>Shift+Return on a result</dt><dd>Save a playlist and open it in the Mac default app for M3U8 files.</dd>
+<dt>Command+Shift+O</dt><dd>Open the playlist folder.</dd>
 <dt>Command+,</dt><dd>Open Settings.</dd>
 <dt>Command+N</dt><dd>Clear the search and return to Website address.</dd>
+<dt>Command+Shift+Return</dt><dd>Find with Browser.</dd>
+<dt>Command+Shift+D</dt><dd>Look Up in Public Directory.</dd>
 <dt>F1</dt><dd>Read help for the focused control. The help dialog also has an Open Manual button.</dd>
 <dt>Shift+F1</dt><dd>Check for updates.</dd>
 <dt>Command+F1</dt><dd>Open the GitHub project.</dd>
@@ -64,8 +77,8 @@ dd { margin-bottom: .5rem; }
 <p>Use StreamSift, Check for Updates to look for a newer signed version. An update installs only after you choose Install Update, and StreamSift then reopens. Your preferences and saved playlists are preserved.</p>
 <h2 id="limits">Limits and privacy</h2>
 <p>StreamSift works with public HTTP and HTTPS links. It reads page and player metadata and common playlist formats, such as M3U, PLS, XSPF and ASX. It can test MP3, MP2, AAC, Ogg Opus, Ogg Vorbis, FLAC and WAV streams and recognise unencrypted live audio HLS playlists. For HLS it checks the playlist, not the individual audio segments. Some players may not support HLS. A stream may go off air later, and some URLs are temporary or work only in certain regions.</p>
-<p>A search has request, size and time limits. StreamSift does not execute page JavaScript, use your cookies or sign in. It cannot find all browser-generated URLs or play signed-in, DRM-protected or restricted streams. It does not scan local network addresses.</p>
-<p>Web requests go directly to the site and the addresses checked, without a search service or an account. The app does not save search or playback history. If you copy, export or send a URL to another app, that app may save the full address, including any parameters.</p>
+<p>A search has request, size and time limits. Normal searches do not execute page JavaScript. Find with Browser runs scripts in a temporary session without your browsing profile, cookies or logins. Neither mode scans private network addresses or bypasses sign-in, DRM or regional restrictions.</p>
+<p>Searches contact the site and media addresses they check. The optional directory lookup downloads public Radio Browser data without sending your entered website address to the directory. The app does not save search or playback history. If you copy, export or send a URL to another app, that app may save the full address, including any parameters.</p>
 <h2 id="credits">Credits and support</h2>
 <p>StreamSift is by Andre Louis. HTML parsing uses <a href="https://github.com/AngleSharp/AngleSharp">AngleSharp</a>, licensed under the MIT License.</p>
 <p><a href="https://onj.me/contact">Contact Andre</a> or <a href="https://onj.me/donate">support development</a>.</p>

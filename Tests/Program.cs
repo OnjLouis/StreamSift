@@ -4,6 +4,66 @@ using System.Diagnostics.Tracing;
 using System.Text;
 using StreamSift;
 
+if (args.Length >= 3 && args[0] == "--directory-live")
+{
+    using var directoryClient = PublicNetwork.CreateClient();
+    var mode = new DirectoryDiscovery(directoryClient, args[1]);
+    foreach (var input in args[2..])
+    {
+        if (!PublicNetwork.TryInput(input, out var website)) throw new ArgumentException("Invalid public address.");
+        var found = await mode.FindAsync(website, CancellationToken.None);
+        Console.WriteLine($"{website.IdnHost}: {found.Stations.Count} verified directory match(es).");
+        foreach (var station in found.Stations.Take(4)) Console.WriteLine($"  {station.Name}, {station.Format}");
+    }
+    return;
+}
+
+if (args is ["--browser-self-test"])
+{
+    if (!BrowserDiscovery.IsAvailable) throw new InvalidOperationException("Browser test requires Chrome or Edge.");
+    const string page = "https://browser-fixture.example/";
+    const string mount = "https://audio-fixture.example/ephemeral";
+    const string redirect = "https://audio-fixture.example/live";
+    const string htmlOnly = "https://audio-fixture.example/not-a-stream";
+    var browserFixture = new Fixture();
+    browserFixture.Text(page, """
+        <title>Browser fixture</title>
+        <button onclick="start()">Play</button>
+        <script>
+        fetch('http://127.0.0.1/scan').catch(() => {});
+        fetch('/change',{method:'POST',body:'not allowed'}).catch(() => {});
+        function start() {
+            const media = new Audio('https://audio-fixture.example/ephemeral');
+            media.play().catch(() => {});
+            const htmlOnly = new Audio('https://audio-fixture.example/not-a-stream');
+            htmlOnly.play().catch(() => {});
+        }
+        </script>
+        """);
+    browserFixture.Redirect(mount, redirect);
+    var frame = new byte[900];
+    foreach (var offset in new[] { 0, 417 }) new byte[] { 0xff, 0xfb, 0x90, 0x64 }.CopyTo(frame, offset);
+    browserFixture.Audio(redirect, frame, "Browser fixture");
+    browserFixture.Text(htmlOnly, """<audio src="https://audio-fixture.example/decoy.mp3"></audio>""");
+    browserFixture.Audio("https://audio-fixture.example/decoy.mp3", frame);
+    using var browserClient = new HttpClient(browserFixture);
+    var browserMode = new BrowserDiscovery(browserClient);
+    var found = await browserMode.FindAsync(new Uri(page), CancellationToken.None);
+    if (found.Stations is not [{ Name: "Browser fixture", Format: "MP3" }] ||
+        found.Stations[0].Url.AbsoluteUri != mount ||
+        browserFixture.Seen.Any(url => url.Contains("127.0.0.1") || url.Contains("/change") || url.Contains("/decoy.mp3")))
+        throw new InvalidOperationException("Browser guard, standalone verification or redirect preservation failed.");
+    using var cancelBrowser = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+    try
+    {
+        await browserMode.FindAsync(new Uri(page), cancelBrowser.Token);
+        throw new InvalidOperationException("Browser cancellation was ignored.");
+    }
+    catch (OperationCanceledException) when (cancelBrowser.IsCancellationRequested) { }
+    Console.WriteLine("Browser discovery, private requests, write blocking, redirects and cancellation passed.");
+    return;
+}
+
 if (args.Length > 0)
 {
     using var trace = args[0] == "--trace" ? new HttpTrace() : null;
@@ -123,6 +183,231 @@ handler.Audio("https://streams.example/port/;", mp3);
 var popup = await engine.FindAsync(new Uri("https://radio.example/popup"), CancellationToken.None);
 Require(popup.Stations is [{ Url.AbsolutePath: "/port/;" }] && popup.Requests == 5, "Passive popup discovery and semicolon mount.");
 
+handler.Text("https://www.example.fm/", """
+    <a href="https://play.example.fm/radio-player/#main">Listen now</a>
+    <a href="https://play.example.fm/radio-player/#rock">Listen to rock</a>
+    <a href="https://play.example.fm.unrelated.example/radio-player/">Listen to an unrelated player</a>
+    <a href="https://news.example.fm/radio-player/">Listen to an unrelated subdomain</a>
+    <a href="https://play.example.fm/contact">Contact</a>
+    """);
+handler.Text("https://play.example.fm/radio-player/", """<script src="/assets/player.js?v=1"></script>""");
+handler.Text("https://play.example.fm/assets/player.js?v=1",
+    """window.Player = {streamUrl: "https:\/\/broadcast.example\/main.mp3"};""", "application/javascript");
+handler.Audio("https://broadcast.example/main.mp3", mp3, "Main FM", "128");
+var beforePlayer = handler.Seen.Count;
+var separatePlayer = await engine.FindAsync(new Uri("https://www.example.fm/"), CancellationToken.None);
+Require(separatePlayer.Stations is [{ Name: "Main FM", Format: "MP3", Bitrate: 128 }],
+    "Player subdomain link did not discover its stream.");
+Require(handler.Seen.Skip(beforePlayer).SequenceEqual(new[]
+    {
+        "https://www.example.fm/", "https://play.example.fm/radio-player/",
+        "https://play.example.fm/assets/player.js?v=1", "https://broadcast.example/main.mp3"
+    }), "Player subdomain navigation fetched a duplicate, non-player or unrelated page.");
+
+handler.Text("https://multiplex.example/", """
+    <aside id="player" class="audio-player"
+        data-src="https://broadcast.example/live.m3u8, https://broadcast.example/high.aac,https://broadcast.example/main-live.mp3?regions=se,no">
+    </aside>
+    <div data-src="https://broadcast.example/unrelated.mp3,ffmpeg://ignored"></div>
+    """);
+handler.Text("https://broadcast.example/live.m3u8", "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nchunk.aac", "application/vnd.apple.mpegurl");
+handler.Audio("https://broadcast.example/high.aac", mp3);
+handler.Audio("https://broadcast.example/main-live.mp3?regions=se,no", mp3);
+var multiplex = await engine.FindAsync(new Uri("https://multiplex.example/"), CancellationToken.None);
+Require(multiplex.Stations.Count == 3 && multiplex.Stations.Any(s => s.IsHls) &&
+    multiplex.Stations.Any(s => s.Url.Query == "?regions=se,no") && multiplex.Requests == 4,
+    "Audio player source list should be split without corrupting commas in URLs.");
+
+handler.Text("https://broadcaster.example/", """
+    <a href="/listen">Listen</a><a href="/help">Help</a><a href="/contact">Contact</a>
+    """ + string.Concat(Enumerable.Range(0, 45).Select(i => $"<a href='/podcasts/episode{i}.mp3'>Podcast</a>")));
+handler.Text("https://broadcaster.example/listen", """
+    <a href="/streaming-urls/">Live streaming URLs</a>
+    """);
+handler.Text("https://broadcaster.example/help", "<p>Listener help</p>");
+handler.Text("https://broadcaster.example/streaming-urls/", """
+    <a href="https://broadcast.example/news.aac">AAC 128 kbps</a>
+    """);
+handler.Audio("https://broadcast.example/news.aac", mp3, "The News");
+var beforeNews = handler.Seen.Count;
+var news = await engine.FindAsync(new Uri("https://broadcaster.example/"), CancellationToken.None);
+Require(news.Stations is [{ Name: "The News" }] &&
+    handler.Seen.Skip(beforeNews).Take(5).Any(url => url.EndsWith("/news.aac", StringComparison.Ordinal)) &&
+    !handler.Seen.Skip(beforeNews).Any(url => url.EndsWith("/contact", StringComparison.Ordinal)),
+    "Explicit live and listener-help links should outrank incidental on-demand audio.");
+
+handler.Text("https://entry.example/", """
+    <script src="https://unrelated.example/main.js"></script>
+    <script src="/assets/vendor.js"></script>
+    <script src="/assets/main.682523bb5ef4cd39.js"></script>
+    """);
+handler.Text("https://entry.example/assets/main.682523bb5ef4cd39.js", """
+    const first = 'https://broadcast.example/entry.aac';
+    """, "application/javascript");
+handler.Audio("https://broadcast.example/entry.aac", mp3, "The Entry");
+var beforeEntry = handler.Seen.Count;
+var entryScript = await engine.FindAsync(new Uri("https://entry.example/"), CancellationToken.None);
+Require(entryScript.Stations is [{ Name: "The Entry" }] &&
+    handler.Seen.Skip(beforeEntry).SequenceEqual(new[] { "https://entry.example/",
+        "https://entry.example/assets/main.682523bb5ef4cd39.js", "https://broadcast.example/entry.aac" }),
+    "Inspect a bounded same-site application entry script, not all JavaScript.");
+
+const string rgPage = "https://radio.garden/listen/test-station/A1b2C3_D";
+const string rgAudio = "https://radio.garden/api/ara/content/listen/A1b2C3_D/channel.mp3";
+handler.Text(rgPage, "<title>Radio Garden station player</title>");
+handler.Redirect(rgAudio, "https://broadcast.example/garden");
+handler.Audio("https://broadcast.example/garden", mp3, "Test Station");
+var beforeGarden = handler.Seen.Count;
+var garden = await engine.FindAsync(new Uri(rgPage), CancellationToken.None);
+Require(garden.Stations is [{ Name: "Test Station", Format: "MP3" }] &&
+    handler.Seen.Skip(beforeGarden).SequenceEqual(new[] { rgAudio, "https://broadcast.example/garden" }),
+    "A Radio Garden station link should use its verified public playback route.");
+handler.Fail(rgAudio, HttpStatusCode.Forbidden);
+var beforeGardenDenied = handler.Seen.Count;
+var gardenDenied = await engine.FindAsync(new Uri(rgPage), CancellationToken.None);
+Require(gardenDenied.Stations.Count == 0 &&
+    handler.Seen.Skip(beforeGardenDenied).SequenceEqual(new[] { rgAudio, rgPage }),
+    "A denied Radio Garden stream should not use a proxy or alternate playback route.");
+var beforeLookalike = handler.Seen.Count;
+var lookalike = await engine.FindAsync(new Uri("https://radio.garden.other.example/listen/test-station/A1b2C3_D"), CancellationToken.None);
+Require(lookalike.Stations.Count == 0 && handler.Seen.Count == beforeLookalike + 1,
+    "An unrelated host cannot trigger the Radio Garden provider.");
+
+handler.Text("https://stationhub.example/", """
+    <a href="https://stream.stationhub.example/">Stream Endpoint List</a>
+    <a href="https://stream.stationhub.example.unrelated.example/">Stream Endpoint List</a>
+    """);
+handler.Text("https://stream.stationhub.example/", """
+    <a href="/1" title="Direct stream (original)">Original</a>
+    <a href="/2" title="Direct stream (lossless, requires subscription)">Lossless</a>
+    """);
+handler.Audio("https://stream.stationhub.example/1", mp3, "Station Hub");
+var beforeHub = handler.Seen.Count;
+var hub = await engine.FindAsync(new Uri("https://stationhub.example/"), CancellationToken.None);
+Require(hub.Stations is [{ Name: "Station Hub" }] &&
+    handler.Seen.Skip(beforeHub).SequenceEqual(new[] { "https://stationhub.example/",
+        "https://stream.stationhub.example/", "https://stream.stationhub.example/1" }),
+    "Follow an advertised stream directory on the station's own subdomain and verify extensionless links.");
+
+handler.Text("https://mixedsource.example/", """
+    <a href="https://stream.mixedsource.example/stream">Live MP3</a>
+    """ + string.Concat(Enumerable.Range(0, 45).Select(i => $"<script>let file='https://cdn.example/{i}/hls.m3u8'</script>")));
+handler.Audio("https://stream.mixedsource.example/stream", mp3, "Main Radio");
+var mixedSources = await engine.FindAsync(new Uri("https://mixedsource.example/"), CancellationToken.None);
+Require(mixedSources.Stations is [{ Name: "Main Radio" }], "Large lists of speculative playlists must not starve direct live mounts.");
+
+handler.Text("https://global-fixture.example/", """
+    <a href="/radio/how-to-listen/getting-started/">How to listen</a>
+    """);
+handler.Text("https://global-fixture.example/radio/how-to-listen/getting-started/", """
+    <a href="https://www.globalplayer.com/live/fixture/uk/">Listen Live</a>
+    <a href="https://www.globalplayer.com/podcasts/123/">Podcasts</a>
+    """);
+handler.Text("https://www.globalplayer.com/live/fixture/uk/", """
+    <title>Global fixture</title>
+    <script type="application/json" id="__NEXT_DATA__">
+    {"props":{"pageProps":{"playable":{"playback":[
+        {"url":"https://restricted.example/premium.m3u8","canUse":"user.logged_in"},
+        {"url":"https://open.example/fixture-live","canUse":"true"},
+        {"url":"https://unrelated.example/recording.mp3"}
+    ]}}}}
+    </script>
+    """);
+handler.Audio("https://open.example/fixture-live", mp3, "Global fixture");
+var beforeGlobal = handler.Seen.Count;
+var global = await engine.FindAsync(new Uri("https://global-fixture.example/"), CancellationToken.None);
+Require(global.Stations is [{ Name: "Global fixture" }] &&
+    handler.Seen.Skip(beforeGlobal).SequenceEqual(new[] {"https://global-fixture.example/",
+        "https://global-fixture.example/radio/how-to-listen/getting-started/", "https://www.globalplayer.com/live/fixture/uk/",
+        "https://open.example/fixture-live"}),
+    "Follow only the advertised Global Player live route and probe only its public streams.");
+
+const string directoryApi = "https://de1.api.radio-browser.info/json/stations/search?hidebroken=true&order=votes&reverse=true&limit=70000";
+const string directoryHome = "https://www.directory-fixture.example/news";
+handler.Text(directoryApi, """
+    [
+      {"homepage":"http://directory-fixture.example/","name":"Other outlet on same site","url":"https://radio.example/other-live"},
+      {"homepage":"http://directory-fixture.example/news/","name":"Named local news","url":"https://radio.example/main-mount"},
+      {"homepage":"https://directory-fixture.example.evil.example/news","name":"Lookalike","url":"https://radio.example/wrong-live"},
+      {"homepage":"https://directory-fixture.example/news","name":"Private","url":"http://127.0.0.1/stream"}
+    ]
+    """, "application/json");
+handler.Redirect("https://radio.example/main-mount", "https://radio.example/current-edge");
+handler.Audio("https://radio.example/current-edge", mp3);
+handler.Audio("https://radio.example/other-live", mp3);
+var directoryCache = Directory.CreateTempSubdirectory("streamsift-directory-test-");
+try
+{
+    var lookup = new DirectoryDiscovery(fixtureClient, directoryCache.FullName);
+    int beforeDirectory = handler.Seen.Count;
+    var listed = await lookup.FindAsync(new Uri(directoryHome), CancellationToken.None);
+    Require(listed.Stations is [{ Name: "Named local news", Format: "MP3" }] &&
+        listed.Stations[0].Url.AbsolutePath == "/main-mount" &&
+        handler.Seen.Skip(beforeDirectory).SequenceEqual(new[] {directoryApi,
+            "https://radio.example/main-mount", "https://radio.example/current-edge"}),
+        "Directory mode must confirm the exact host and channel, preserve the name and retain the playable redirect.");
+    int beforeCached = handler.Seen.Count;
+    var cachedDirectory = await lookup.FindAsync(new Uri(directoryHome), CancellationToken.None);
+    Require(cachedDirectory.Stations is [{ Name: "Named local news" }] &&
+        !handler.Seen.Skip(beforeCached).Contains(directoryApi),
+        "A fresh public catalogue should be reused without a network request to the directory.");
+    int beforeMissing = handler.Seen.Count;
+    var missing = await lookup.FindAsync(new Uri("https://directory-fixture.example/unlisted-channel"), CancellationToken.None);
+    Require(missing.Stations.Count == 0 && handler.Seen.Count == beforeMissing,
+        "A missing channel must not offer another outlet from the same network.");
+    var network = await lookup.FindAsync(new Uri("https://directory-fixture.example/"), CancellationToken.None);
+    Require(network.Stations.Select(station => station.Name).ToHashSet().SetEquals(["Other outlet on same site", "Named local news"]),
+        "A network homepage can offer multiple named outlets.");
+}
+finally { directoryCache.Delete(recursive: true); }
+
+handler.Fail(directoryApi, HttpStatusCode.BadGateway);
+var directoryMirror = new UriBuilder(directoryApi) { Host = "de2.api.radio-browser.info" }.Uri.AbsoluteUri;
+handler.Text(directoryMirror,
+    """[{"homepage":"https://www.directory-fixture.example/news","name":"Mirror station","url":"https://radio.example/main-mount"}]""",
+    "application/json");
+var mirrorCache = Directory.CreateTempSubdirectory("streamsift-directory-test-");
+try
+{
+    var viaMirror = await new DirectoryDiscovery(fixtureClient, mirrorCache.FullName)
+        .FindAsync(new Uri(directoryHome), CancellationToken.None);
+    Require(viaMirror.Stations is [{ Name: "Mirror station" }] && handler.Seen.Contains(directoryMirror),
+        "Retry a failing directory server on its public mirror.");
+}
+finally { mirrorCache.Delete(recursive: true); }
+
+const string srPage = "https://www.sverigesradio.se/kanaler";
+const string srCatalogue = "https://api.sr.se/api/v2/channels?format=json&pagination=false";
+const string srP1 = "https://www.sverigesradio.se/topsy/direkt/srapi/132.mp3";
+const string srP4 = "https://www.sverigesradio.se/topsy/direkt/srapi/221.mp3";
+handler.Fail(srPage, HttpStatusCode.Forbidden);
+handler.Text(srCatalogue, """
+    {"channels":[
+        {"name":"P1","channeltype":"Rikskanal","liveaudio":{"url":"https://www.sverigesradio.se/topsy/direkt/srapi/132.mp3"}},
+        {"name":"P4 \u00d6rebro","channeltype":"Lokal kanal","liveaudio":{"url":"https://www.sverigesradio.se/topsy/direkt/srapi/221.mp3"}},
+        {"name":"SR Extra01","channeltype":"Extrakanaler","liveaudio":{"url":"https://www.sverigesradio.se/topsy/direkt/srapi/2383.mp3"}},
+        {"name":"Offline","liveaudio":null},
+        {"name":"Unrelated","liveaudio":{"url":"https://www.sverigesradio.se.unrelated.example/track.mp3"}},
+        {"name":"Private","liveaudio":{"url":"http://127.0.0.1/track.mp3"}}
+    ]}
+    """, "application/json");
+handler.Redirect(srP1, "https://live1.sr.se/p1-mp3-96");
+handler.Audio("https://live1.sr.se/p1-mp3-96", mp3, br: "96");
+handler.Audio(srP4, mp3, br: "96");
+var beforeSweden = handler.Seen.Count;
+var sweden = await engine.FindAsync(new Uri(srPage), CancellationToken.None);
+Require(sweden.Stations.Select(s => s.Name).SequenceEqual(new[] { "P1", "P4 \u00d6rebro" }),
+    "Sveriges Radio directory should find named stations even when the website is unavailable.");
+Require(handler.Seen.Skip(beforeSweden).SequenceEqual(new[] { srCatalogue, srP1, "https://live1.sr.se/p1-mp3-96", srP4 }),
+    "Sveriges Radio directory requested an off-air slot, unrelated address or unnecessary web page.");
+handler.Text(srCatalogue, """{"channels":[null],"invalid": """, "application/json");
+handler.Text(srPage, """<audio src="https://live1.sr.se/p1-mp3-96"></audio>""");
+var beforeBrokenDirectory = handler.Seen.Count;
+var brokenDirectory = await engine.FindAsync(new Uri(srPage), CancellationToken.None);
+Require(brokenDirectory.Stations is [{ Format: "MP3" }] &&
+    handler.Seen.Skip(beforeBrokenDirectory).SequenceEqual(new[] { srCatalogue, srPage, "https://live1.sr.se/p1-mp3-96" }),
+    "A malformed official directory should fall back to the original web page.");
+
 handler.Text("https://radio.example/mirrors", """
     #EXTM3U
     http://ice1.somafm.com/test
@@ -223,6 +508,7 @@ sealed class Fixture : HttpMessageHandler
     };
     public void Redirect(string uri, string to) => fixtures[uri] = () =>
         new(HttpStatusCode.Redirect) { Headers = { Location = new Uri(to) } };
+    public void Fail(string uri, HttpStatusCode status) => fixtures[uri] = () => new(status);
 
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
     {

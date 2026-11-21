@@ -8,6 +8,7 @@ internal sealed class MainForm : Form
     private readonly HttpClient client = PublicNetwork.CreateClient();
     private readonly TextBox url = new() { AccessibleName = "Website address", Dock = DockStyle.Fill, MaxLength = 4096, TabIndex = 0 };
     private readonly ShortcutButton find = new() { Text = "Find streams", ShortcutText = "Ctrl+Enter", AutoSize = true, TabIndex = 1 };
+    private readonly ShortcutButton findBrowser = new() { Text = "Find with browser", ShortcutText = "Ctrl+Shift+Enter", AutoSize = true };
     private readonly ShortcutButton cancel = new() { Text = "Cancel", ShortcutText = "Esc", AutoSize = true, Enabled = false, TabIndex = 2 };
     private readonly StreamList results = new()
     {
@@ -21,7 +22,8 @@ internal sealed class MainForm : Form
     };
     private readonly TextBox status = new() { AccessibleName = "Status", ReadOnly = true, Dock = DockStyle.Fill, TabIndex = 3 };
     private readonly Dictionary<Control, string> help = new();
-    private readonly ToolStripMenuItem copyCommand, saveCommand, foobarCommand, openPlayerCommand, preferencesCommand, updateCommand;
+    private readonly ToolStripMenuItem copyCommand, saveCommand, openFolderCommand, foobarCommand, openPlayerCommand, preferencesCommand, updateCommand;
+    private readonly ToolStripMenuItem browserCommand, directoryCommand;
     private readonly SearchSounds sounds = new();
     private readonly System.Windows.Forms.Timer handoffs = new() { Interval = 30000 };
     private Preferences preferences = Preferences.Load(Preferences.UserDirectory);
@@ -31,6 +33,9 @@ internal sealed class MainForm : Form
     private bool pendingUpdateNotice;
     private int requestCount;
     private bool closing;
+    private bool browserScan;
+    private bool closeAfterScan;
+    private enum SearchMode { Passive, Browser, Directory }
 
     internal MainForm()
     {
@@ -47,13 +52,19 @@ internal sealed class MainForm : Form
         file.DropDownItems.Add(MenuCommand.Create("New search", ResetSearch, Keys.Control | Keys.N));
         saveCommand = MenuCommand.Create("Save playlist...", Export, Keys.Control | Keys.S);
         file.DropDownItems.Add(saveCommand);
+        openFolderCommand = MenuCommand.Create("Open playlist folder", OpenPlaylistFolder, Keys.Control | Keys.Shift | Keys.O);
+        file.DropDownItems.Add(openFolderCommand);
         file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add(MenuCommand.Create("E&xit", Close));
         var actions = new ToolStripMenuItem("&Actions");
+        browserCommand = MenuCommand.Create("Find with browser", () => _ = FindAsync(SearchMode.Browser),
+            Keys.Control | Keys.Shift | Keys.Enter);
+        directoryCommand = MenuCommand.Create("Look up in public directory", () => _ = FindAsync(SearchMode.Directory),
+            Keys.Control | Keys.Shift | Keys.D);
         copyCommand = MenuCommand.Create("Copy stream address", Copy, display: "Ctrl+C");
-        foobarCommand = MenuCommand.Create("Add to Foobar2000", AddToFoobar, Keys.Control | Keys.Shift | Keys.O);
+        foobarCommand = MenuCommand.Create("Add to Foobar2000", AddToFoobar, Keys.Control | Keys.Shift | Keys.F);
         openPlayerCommand = MenuCommand.Create("Open in default player", OpenInDefaultPlayer, display: "Shift+Enter");
-        actions.DropDownItems.AddRange([copyCommand, foobarCommand, openPlayerCommand]);
+        actions.DropDownItems.AddRange([browserCommand, directoryCommand, new ToolStripSeparator(), copyCommand, foobarCommand, openPlayerCommand]);
         var options = new ToolStripMenuItem("&Options");
         preferencesCommand = MenuCommand.Create("Preferences...", ShowPreferences, Keys.Control | Keys.Oemcomma, "Ctrl+,");
         options.DropDownItems.Add(preferencesCommand);
@@ -70,20 +81,23 @@ internal sealed class MainForm : Form
 
         var entry = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 4, RowCount = 1, Margin = new(0), TabIndex = 0
+            Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, RowCount = 2, Margin = new(0), TabIndex = 0
         };
         entry.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         entry.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        entry.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        entry.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        entry.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        entry.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         var urlLabel = new Label { Text = "&Website address:", Anchor = AnchorStyles.Left, AutoSize = true, TabIndex = 0 };
         url.TabIndex = 1;
-        find.TabIndex = 2;
-        cancel.TabIndex = 3;
+        find.TabIndex = 0;
+        findBrowser.TabIndex = 1;
+        cancel.TabIndex = 2;
+        var buttons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Margin = new(0), TabIndex = 2 };
+        buttons.Controls.AddRange([find, findBrowser, cancel]);
         entry.Controls.Add(urlLabel, 0, 0);
         entry.Controls.Add(url, 1, 0);
-        entry.Controls.Add(find, 2, 0);
-        entry.Controls.Add(cancel, 3, 0);
+        entry.Controls.Add(buttons, 0, 1);
+        entry.SetColumnSpan(buttons, 2);
 
         results.Columns.Add("Stream", 560);
         results.SelectedIndexChanged += (_, _) => UpdateSelection();
@@ -113,12 +127,14 @@ internal sealed class MainForm : Form
         Controls.Add(menus);
 
         help[url] = "Enter or paste a public station website, player page or stream address. Press Enter to find streams.";
-        help[find] = "Scan this address for live audio. The app checks the page, player links and playlists for a playable stream.";
+        help[find] = "Scan this address for live audio without starting a web player.";
+        help[findBrowser] = "Look for live audio using a temporary, muted browser. Requires Chrome or Microsoft Edge.";
         help[cancel] = "Stop the current search. You can also press Escape.";
         help[results] = "Move with the arrow keys. Ctrl+C copies the stream address. Enter opens its context menu. Shift+Enter saves a playlist and opens it in your default player.";
         help[details] = "Review the stream address and the page where it was found. Ctrl+C copies selected text.";
         help[status] = "Review the last result or operation. A search with no results does not prove that the website has no live stream.";
         find.Click += async (_, _) => await FindAsync();
+        findBrowser.Click += async (_, _) => await FindAsync(SearchMode.Browser);
         cancel.Click += (_, _) => scan?.Cancel();
         Shown += async (_, _) =>
         {
@@ -129,6 +145,13 @@ internal sealed class MainForm : Form
         FormClosing += (_, e) =>
         {
             if (updateCheck != null) { updateCheck.Cancel(); e.Cancel = true; return; }
+            if (browserScan && scan != null)
+            {
+                closeAfterScan = true;
+                scan.Cancel();
+                e.Cancel = true;
+                return;
+            }
             closing = true;
             scan?.Cancel();
             startupUpdate?.Cancel();
@@ -151,7 +174,7 @@ internal sealed class MainForm : Form
     private static bool IsSearchKey(Keys key, bool inAddress) =>
         key == (Keys.Control | Keys.Enter) || (inAddress && key == Keys.Enter);
 
-    private async Task FindAsync()
+    private async Task FindAsync(SearchMode mode = SearchMode.Passive)
     {
         if (scan != null || updateCheck != null) return;
         if (!PublicNetwork.TryInput(url.Text, out var address))
@@ -160,22 +183,42 @@ internal sealed class MainForm : Form
             status.Focus();
             return;
         }
+        if (mode == SearchMode.Browser && !BrowserDiscovery.IsAvailable)
+        {
+            SetStatus("Find with browser requires Chrome or Microsoft Edge.");
+            status.Focus();
+            return;
+        }
         var operation = new CancellationTokenSource();
         scan = operation;
-        bool focusCancel = find.Focused || results.Focused || details.Focused;
+        browserScan = mode == SearchMode.Browser;
+        bool focusCancel = find.Focused || findBrowser.Focused || results.Focused || details.Focused;
         cancel.Enabled = true;
         if (focusCancel) cancel.Focus();
         ClearResults();
         requestCount = 0;
-        SetStatus("Searching...");
+        SetStatus(mode switch
+        {
+            SearchMode.Browser => "Searching with a temporary browser...",
+            SearchMode.Directory => "Checking the public radio directory...",
+            _ => "Searching..."
+        });
         sounds.SearchStarted();
         url.ReadOnly = true;
-        find.Enabled = false;
+        find.Enabled = findBrowser.Enabled = false;
+        browserCommand.Enabled = false;
+        directoryCommand.Enabled = false;
         var progress = new Progress<int>(n => { if (scan == operation) requestCount = n; });
         var focusResults = false;
         try
         {
-            var found = await Task.Run(() => new Discovery(client).FindAsync(address, operation.Token, progress));
+            var found = await Task.Run(() => mode switch
+            {
+                SearchMode.Browser => new BrowserDiscovery(client).FindAsync(address, operation.Token, progress),
+                SearchMode.Directory => new DirectoryDiscovery(client, Path.Combine(Preferences.UserDirectory, "Cache"))
+                    .FindAsync(address, operation.Token, progress),
+                _ => new Discovery(client).FindAsync(address, operation.Token, progress)
+            });
             if (closing) return;
             results.BeginUpdate();
             try
@@ -193,7 +236,13 @@ internal sealed class MainForm : Form
                 }
             }
             finally { results.EndUpdate(); }
-            SetStatus((found.Stations.Count switch
+            var sourceLabel = mode switch
+            {
+                SearchMode.Browser => "Browser-assisted search: ",
+                SearchMode.Directory => "Public directory: ",
+                _ => ""
+            };
+            SetStatus(sourceLabel + (found.Stations.Count switch
                 { 0 => "No live streams verified.", 1 => "1 stream found.", _ => $"{found.Stations.Count} streams found." }) +
                 $" Checked {found.Requests} {(found.Requests == 1 ? "address" : "addresses")}." +
                 (found.Unreachable > 0 ? $" {found.Unreachable} unavailable." : "") +
@@ -201,20 +250,29 @@ internal sealed class MainForm : Form
             sounds.SearchCompleted();
         }
         catch (OperationCanceledException) { if (!closing) SetStatus($"Search cancelled after {requestCount} request(s)."); }
-        catch (Exception e) when (e is HttpRequestException or IOException or InvalidOperationException)
+        catch (Exception e) when (e is HttpRequestException or IOException or InvalidOperationException or
+            System.ComponentModel.Win32Exception or System.Text.Json.JsonException or UnauthorizedAccessException)
         {
-            if (!closing) SetStatus("Search could not finish. Try the station's player page.");
+            if (!closing) SetStatus(mode switch
+            {
+                SearchMode.Browser => "Browser-assisted search could not finish.",
+                SearchMode.Directory => "Public directory lookup could not finish.",
+                _ => "Search could not finish. Try the station's player page."
+            });
         }
         finally
         {
             scan = null;
+            browserScan = false;
             operation.Dispose();
             if (!closing)
             {
                 // Remember the next focus inside this window even when the app is in the background.
-                var focus = IsSearchControl(ActiveControl) || url.Focused || cancel.Focused || find.Focused;
+                var focus = IsSearchControl(ActiveControl) || url.Focused || cancel.Focused || find.Focused || findBrowser.Focused;
                 url.ReadOnly = false;
-                find.Enabled = true;
+                find.Enabled = findBrowser.Enabled = true;
+                browserCommand.Enabled = true;
+                directoryCommand.Enabled = true;
                 UpdateSelection();
                 if (focus)
                 {
@@ -224,11 +282,12 @@ internal sealed class MainForm : Form
                 }
                 cancel.Enabled = false;
                 if (pendingUpdateNotice) SetStatus(status.Text);
+                if (closeAfterScan) BeginInvoke(new Action(Close));
             }
         }
     }
 
-    private bool IsSearchControl(Control? control) => control == url || control == cancel || control == find;
+    private bool IsSearchControl(Control? control) => control == url || control == cancel || control == find || control == findBrowser;
 
     private async Task CheckForUpdatesAsync()
     {
@@ -241,7 +300,9 @@ internal sealed class MainForm : Form
         using var operation = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         updateCheck = operation;
         updateCommand.Enabled = false;
-        find.Enabled = false;
+        find.Enabled = findBrowser.Enabled = false;
+        browserCommand.Enabled = false;
+        directoryCommand.Enabled = false;
         bool installing = false;
         try
         {
@@ -280,7 +341,9 @@ internal sealed class MainForm : Form
             else
             {
                 updateCommand.Enabled = true;
-                find.Enabled = true;
+                find.Enabled = findBrowser.Enabled = true;
+                browserCommand.Enabled = true;
+                directoryCommand.Enabled = true;
             }
         }
     }
@@ -404,6 +467,13 @@ internal sealed class MainForm : Form
         });
     }
 
+    private void OpenPlaylistFolder() => SafeAction(() =>
+    {
+        var folder = preferences.ExportFolder;
+        Directory.CreateDirectory(folder);
+        Open(folder);
+    });
+
     private void OpenInDefaultPlayer()
     {
         if (Selected is not Station item) return;
@@ -487,21 +557,32 @@ internal sealed class MainForm : Form
     {
         var page = url.Parent!;
         var panel = page.Parent!;
-        bool ok = page.Controls.GetChildIndex(url) < page.Controls.GetChildIndex(find) &&
-            url.TabIndex < find.TabIndex && find.TabIndex < cancel.TabIndex &&
+        var buttons = find.Parent!;
+        bool ok = buttons.Parent == page && findBrowser.Parent == buttons && cancel.Parent == buttons &&
+            page.Controls.GetChildIndex(url) < page.Controls.GetChildIndex(buttons) &&
+            url.TabIndex < buttons.TabIndex && find.TabIndex < findBrowser.TabIndex && findBrowser.TabIndex < cancel.TabIndex &&
             page.TabIndex < results.TabIndex && results.TabIndex < details.TabIndex && details.TabIndex < status.TabIndex &&
             results.Parent == panel && !details.AcceptsTab && details.ReadOnly && status.ReadOnly &&
             results.AccessibilityObject.Name == "Streams" && url.AccessibilityObject.Name == "Website address" &&
             find.AccessibilityObject.KeyboardShortcut == "Ctrl+Enter" && cancel.AccessibilityObject.KeyboardShortcut == "Esc" &&
+            findBrowser.AccessibilityObject.Name == "Find with browser" && findBrowser.AccessibilityObject.KeyboardShortcut == "Ctrl+Shift+Enter" &&
             IsSearchKey(Keys.Enter, true) && !IsSearchKey(Keys.Enter, false) &&
             IsSearchKey(Keys.Control | Keys.Enter, false) && StreamList.OpensMenu(Keys.Enter) &&
             StreamList.OpensMenu(Keys.Apps) && StreamList.OpensMenu(Keys.Shift | Keys.F10) &&
             StreamList.CopiesStream(Keys.Control | Keys.C) && !StreamList.CopiesStream(Keys.Control | Keys.Shift | Keys.C) &&
             copyCommand.ShortcutKeys == Keys.None && updateCommand.ShortcutKeys == (Keys.Shift | Keys.F1) &&
             preferencesCommand.ShortcutKeys == (Keys.Control | Keys.Oemcomma) &&
+            browserCommand.ShortcutKeys == (Keys.Control | Keys.Shift | Keys.Enter) &&
+            directoryCommand.ShortcutKeys == (Keys.Control | Keys.Shift | Keys.D) &&
+            openFolderCommand.Enabled && openFolderCommand.ShortcutKeys == (Keys.Control | Keys.Shift | Keys.O) &&
+            foobarCommand.ShortcutKeys == (Keys.Control | Keys.Shift | Keys.F) &&
             StreamList.OpensDefaultPlayer(Keys.Shift | Keys.Enter) && !StreamList.OpensMenu(Keys.Shift | Keys.Enter);
         using var preferencesFixture = new PreferencesDialog(new Preferences(), () => { });
         ok &= preferencesFixture.CheckControls();
+        var shortcuts = MainMenuStrip!.Items.OfType<ToolStripMenuItem>()
+            .SelectMany(item => item.DropDownItems.OfType<ToolStripMenuItem>())
+            .Select(item => item.ShortcutKeys).Where(keys => keys != Keys.None).ToArray();
+        ok &= shortcuts.Length == shortcuts.Distinct().Count();
         foreach (var list in MainMenuStrip!.Items.OfType<ToolStripMenuItem>()
                      .Select(i => i.DropDownItems.OfType<ToolStripMenuItem>()).Append(MainMenuStrip.Items.OfType<ToolStripMenuItem>()))
         {

@@ -10,6 +10,7 @@ import UniformTypeIdentifiers
                                         backing: .buffered, defer: false)
     private let address = NSTextField()
     private let find = NSButton(title: "Find Streams", target: nil, action: nil)
+    private let findBrowser = NSButton(title: "Find with Browser", target: nil, action: nil)
     private let cancel = NSButton(title: "Cancel", target: nil, action: nil)
     private let table = StreamTable()
     private let details = readOnlyText("Stream details", hint: "Review the stream address and where it was found.")
@@ -73,12 +74,17 @@ import UniformTypeIdentifiers
         label("Website address", for: address, hint: "Paste a public station page, playlist or stream address. Press Return to search.")
         find.target = self
         find.action = #selector(findStreams)
+        findBrowser.target = self
+        findBrowser.action = #selector(findWithBrowser)
         cancel.target = self
         cancel.action = #selector(cancelSearch)
-        label("Find Streams", for: find, hint: "Search the website for live audio streams.")
+        label("Find Streams", for: find, hint: "Search for live audio without starting a web player.")
+        label("Find with Browser", for: findBrowser, hint: "Look for live audio using a temporary, muted browser. Requires Chrome or Microsoft Edge.")
         label("Cancel", for: cancel, hint: "Stop the current search. You can also press Escape.")
-        let entry = NSStackView(views: [caption, address, find, cancel])
+        let entry = NSStackView(views: [caption, address])
         entry.alignment = .centerY
+        let searchButtons = NSStackView(views: [find, findBrowser, cancel])
+        searchButtons.alignment = .centerY
 
         label("Streams", for: table, hint: "Move through streams with the arrow keys. Return opens actions. Shift+Return opens the selected stream in your player.")
         table.usesAlternatingRowBackgroundColors = true
@@ -101,7 +107,7 @@ import UniformTypeIdentifiers
         let listView = scroll(table)
         let detailView = scroll(details)
         let statusView = scroll(status)
-        let content = NSStackView(views: [entry, listView, detailView, statusView])
+        let content = NSStackView(views: [entry, searchButtons, listView, detailView, statusView])
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 10
@@ -149,7 +155,9 @@ import UniformTypeIdentifiers
         main.items[0].submenu?.item(withTitle: "Hide Others")?.keyEquivalentModifierMask = [.command, .option]
         _ = section("File", [
             item("New Search", #selector(reset), "n"),
-            item("Save Playlist...", #selector(savePlaylist), "s"), .separator(),
+            item("Save Playlist...", #selector(savePlaylist), "s"),
+            item("Open Playlist Folder", #selector(openPlaylistFolder), "o", modifiers: [.command, .shift]),
+            .separator(),
             NSMenuItem(title: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         ])
         _ = section("Edit", [
@@ -162,6 +170,8 @@ import UniformTypeIdentifiers
         ])
         _ = section("Actions", [
             item("Find Streams", #selector(findStreams), "\r"),
+            item("Find with Browser", #selector(findWithBrowser), "\r", modifiers: [.command, .shift]),
+            item("Look Up in Public Directory", #selector(findInDirectory), "d", modifiers: [.command, .shift]),
             item("Copy Stream Address", #selector(copyAddress)),
             item("Open in Default Player", #selector(openDefaultPlayer))
         ])
@@ -184,7 +194,9 @@ import UniformTypeIdentifiers
         switch menuItem.action {
         case #selector(savePlaylist), #selector(copyAddress), #selector(openDefaultPlayer):
             return selected != nil && window.isKeyWindow && window.attachedSheet == nil
-        case #selector(reset), #selector(findStreams):
+        case #selector(openPlaylistFolder):
+            return window.isKeyWindow && window.attachedSheet == nil
+        case #selector(reset), #selector(findStreams), #selector(findWithBrowser), #selector(findInDirectory):
             return job == nil && window.isKeyWindow && window.attachedSheet == nil
         case #selector(checkUpdates): return !checkingUpdate
         default: return true
@@ -228,13 +240,14 @@ import UniformTypeIdentifiers
         details.setAccessibilityElement(selected != nil)
         address.isEditable = job == nil
         find.isEnabled = job == nil
+        findBrowser.isEnabled = job == nil
         cancel.isEnabled = job != nil
         let controls = mainKeyOrder
         for (index, view) in controls.enumerated() { view.nextKeyView = controls[(index + 1) % controls.count] }
     }
 
     private var mainKeyOrder: [NSView] {
-        [address, job == nil ? find : cancel] + (stations.isEmpty ? [] : [table]) +
+        [address] + (job == nil ? [find, findBrowser] : [cancel]) + (stations.isEmpty ? [] : [table]) +
             (selected == nil ? [] : [details]) + [status]
     }
 
@@ -261,17 +274,23 @@ import UniformTypeIdentifiers
         }
     }
 
-    @objc private func findStreams() {
+    @objc private func findStreams() { startSearch(mode: .passive) }
+
+    @objc private func findWithBrowser() { startSearch(mode: .browser) }
+
+    @objc private func findInDirectory() { startSearch(mode: .directory) }
+
+    private func startSearch(mode: SearchMode) {
         guard job == nil else { return }
         let input = address.currentEditor()?.string ?? address.stringValue
         let running = ScanJob()
         do {
-            try running.start(input) { [weak self] result in self?.finished(result) }
+            try running.start(input, mode: mode) { [weak self] result in self?.finished(result, mode: mode) }
             isCancelling = false
             job = running
             load([])
             window.makeFirstResponder(cancel)
-            setStatus("Searching...")
+            setStatus(mode.starting)
             if preferences.sounds { startSound?.stop(); startSound?.play() }
         } catch {
             setStatus(error.localizedDescription)
@@ -285,9 +304,9 @@ import UniformTypeIdentifiers
         job.cancel()
     }
 
-    private func finished(_ result: Result<SearchResult, Error>) {
+    private func finished(_ result: Result<SearchResult, Error>, mode: SearchMode) {
         let focused = window.focusedView
-        let moveFocus = focused === cancel || focused === address || focused === find
+        let moveFocus = focused === cancel || focused === address || focused === find || focused === findBrowser
         job = nil
         let message: String
         if isCancelling {
@@ -296,7 +315,7 @@ import UniformTypeIdentifiers
             switch result {
             case .success(let found):
                 load(found.stations)
-                message = found.summary
+                message = mode.resultPrefix + found.summary
                 if preferences.sounds { doneSound?.stop(); doneSound?.play() }
             case .failure(let error):
                 message = (error as? StreamError)?.errorDescription ?? StreamError.search.errorDescription ?? "Search failed."
@@ -348,6 +367,16 @@ import UniformTypeIdentifiers
                 self?.setStatus("Playlist saved: \(file.lastPathComponent)")
             } catch { self?.showMessage("Playlist Could Not Be Saved", error.localizedDescription) }
         }
+    }
+
+    @objc private func openPlaylistFolder() {
+        let folder = preferences.folder
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            if !NSWorkspace.shared.open(folder) {
+                showMessage("Could Not Open Playlist Folder", "Finder could not open the playlist folder.")
+            }
+        } catch { showMessage("Could Not Open Playlist Folder", error.localizedDescription) }
     }
 
     @objc private func openDefaultPlayer() {

@@ -6,7 +6,7 @@ namespace StreamSift;
 public sealed record Station(string Name, Uri Url, string Format, int? Bitrate, Uri FoundOn, bool IsHls);
 public sealed record SearchResult(IReadOnlyList<Station> Stations, int Requests, int Unreachable, bool LimitReached);
 
-internal enum LinkKind { Audio, Playlist, Player, Script, Catalogue }
+internal enum LinkKind { Audio, Playlist, Player, DedicatedPlayer, Script, Catalogue }
 internal enum NameOrigin { Inferred, Directory, Playlist }
 internal sealed record Link(Uri Url, Uri FoundOn, LinkKind Kind, string? Name = null, bool AudioHint = false,
     NameOrigin NameOrigin = NameOrigin.Inferred, Uri? Wrapper = null);
@@ -18,7 +18,20 @@ public sealed class Discovery(HttpClient client)
     private const int TextLimit = 768 * 1024, AudioProbeLimit = 4096;
     private static readonly TimeSpan ScanLimit = TimeSpan.FromSeconds(38), RequestLimit = TimeSpan.FromSeconds(7);
 
-    public async Task<SearchResult> FindAsync(Uri start, CancellationToken cancel, IProgress<int>? progress = null)
+    public Task<SearchResult> FindAsync(Uri start, CancellationToken cancel, IProgress<int>? progress = null) =>
+        FindCoreAsync(start, null, cancel, progress);
+
+    internal Task<SearchResult> VerifyObservedAsync(Uri start, IEnumerable<Uri> candidates,
+        CancellationToken cancel, IProgress<int>? progress = null) =>
+        VerifyListedAsync(start, candidates.Select(candidate => new Link(candidate, start, LinkKind.Audio, start.IdnHost, true)),
+            cancel, progress);
+
+    internal Task<SearchResult> VerifyListedAsync(Uri start, IEnumerable<Link> candidates,
+        CancellationToken cancel, IProgress<int>? progress = null) =>
+        FindCoreAsync(start, candidates, cancel, progress);
+
+    private async Task<SearchResult> FindCoreAsync(Uri start, IEnumerable<Link>? observed,
+        CancellationToken cancel, IProgress<int>? progress)
     {
         var todo = new PriorityQueue<(Link Link, int Depth), (int Rank, int Order)>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -29,13 +42,27 @@ public sealed class Discovery(HttpClient client)
         Uri? site = null;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancel);
         deadline.CancelAfter(ScanLimit);
-        Queue(new Link(start, start, LinkKind.Player), 0);
+        Link? preferred = null;
+        if (observed == null)
+        {
+            var catalogue = Extraction.OfficialCatalogue(start);
+            preferred = catalogue != null ? new Link(catalogue, start, LinkKind.Catalogue) : Extraction.PublicPlayerSource(start);
+            if (preferred != null) Queue(preferred, 0);
+            Queue(new Link(start, start, LinkKind.Player), 0);
+        }
+        else
+        {
+            foreach (var candidate in observed.Take(PageResults))
+                Queue(candidate, 0);
+        }
 
         try
         {
             while (requests < requestLimit && results.Count < resultLimit && todo.TryDequeue(out var item, out _))
             {
                 deadline.Token.ThrowIfCancellationRequested();
+                if (preferred != null && item.Depth == 0 && item.Link.Url == start && results.Count > 0)
+                    continue; // The public playback route supplied playable audio; no web player is needed.
                 using var requestTime = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
                 requestTime.CancelAfter(RequestLimit);
                 var token = requestTime.Token;
@@ -53,7 +80,7 @@ public sealed class Discovery(HttpClient client)
                     }, token);
                     if (!response.IsSuccessStatusCode) { failures++; continue; }
                     var final = response.RequestMessage?.RequestUri ?? uri;
-                    site ??= final;
+                    if (item.Depth == 0 && item.Link.Url == start) site ??= final;
                     seen.Add(final.AbsoluteUri);
                     var kind = response.Content.Headers.ContentType?.MediaType?.ToLowerInvariant() ?? "";
                     var stationName = Header(response, "icy-name");
@@ -111,14 +138,26 @@ public sealed class Discovery(HttpClient client)
             if (link.NameOrigin != NameOrigin.Inferred && link.Name != null &&
                 (!names.TryGetValue(key, out var current) || link.NameOrigin > current.NameOrigin)) names[key] = link;
             if (depth > 4 || seen.Count >= MaxLinks || !seen.Add(link.Url.AbsoluteUri)) return;
-            int rank = link.Kind switch { LinkKind.Catalogue => -1, LinkKind.Audio => 0, LinkKind.Playlist => 1, LinkKind.Script => 2, _ => 3 };
+            int rank = link.Kind switch
+            {
+                LinkKind.Catalogue => -2,
+                LinkKind.Audio when link.AudioHint => -1,
+                LinkKind.DedicatedPlayer or LinkKind.Script => 0,
+                LinkKind.Audio => 1,
+                LinkKind.Playlist => 2,
+                _ => 3
+            };
             todo.Enqueue((link, depth), (rank, seen.Count));
         }
 
         void Evaluate(string text, string type, Uri address, Link source, int depth)
         {
-            var info = Extraction.Read(text, type, address, source, site!, deadline.Token);
-            if (info.IsDirectory)
+            if (observed != null && !type.Contains("mpegurl") && !type.Contains("scpls") &&
+                !type.Contains("xspf") && type != "video/x-ms-asf" &&
+                !text.TrimStart('\uFEFF', ' ', '\r', '\n', '\t').StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase))
+                return; // Browser candidates are media, not new starting points for the website crawl.
+            var info = Extraction.Read(text, type, address, source, site ?? start, deadline.Token);
+            if (info.IsDirectory && observed == null)
             {
                 requestLimit = CatalogueRequests;
                 resultLimit = CatalogueResults;
@@ -133,7 +172,9 @@ public sealed class Discovery(HttpClient client)
             var title = stable?.Name ?? Extraction.StationName(name) ?? Extraction.StationName(source.Name) ??
                 Extraction.Label(address.Segments.LastOrDefault()?.Trim('/')) ?? address.Host;
             var key = SomaMount(address) ?? address.AbsoluteUri;
-            var station = new Station(title, address, format, bitrate, stable?.FoundOn ?? source.FoundOn, hls);
+            var playbackAddress = observed != null && source.Kind == LinkKind.Audio
+                ? source.Url : address;
+            var station = new Station(title, playbackAddress, format, bitrate, stable?.FoundOn ?? source.FoundOn, hls);
             if (!results.TryAdd(key, station) && address.Scheme == "https" && results[key].Url.Scheme == "http") results[key] = station;
         }
     }

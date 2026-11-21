@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml;
 using System.Xml.Linq;
@@ -22,9 +23,29 @@ internal static partial class Extraction
     private static partial Regex CommentLines();
     [GeneratedRegex("""(?:^|,)([A-Z0-9-]+)=("[^"]*"|[^,]*)""", RegexOptions.None, 200)]
     private static partial Regex HlsAttributes();
+    [GeneratedRegex(""",\s*(?=https?://)""", RegexOptions.IgnoreCase, 200)]
+    private static partial Regex AudioSourceSeparator();
+    [GeneratedRegex(@"^(?:main|app|index|bundle)(?:[.-][a-f0-9]{8,32})?(?:\.min)?\.(?:m?js)$",
+        RegexOptions.IgnoreCase, 200)]
+    private static partial Regex AppEntryFile();
 
     private const int MaxPageLinks = 100;
+    private static readonly Uri SwedishRadioChannels = new("https://api.sr.se/api/v2/channels?format=json&pagination=false");
     internal sealed record Extracted(bool LiveHls, bool IsDirectory, List<Link> Links);
+
+    internal static Uri? OfficialCatalogue(Uri page) =>
+        page.IsDefaultPort && IsSwedishRadioSite(page) && page.AbsolutePath.TrimEnd('/') is "" or "/kanaler"
+            ? SwedishRadioChannels : null;
+
+    internal static Link? PublicPlayerSource(Uri page)
+    {
+        if (page.IdnHost != "radio.garden" || !page.IsDefaultPort) return null;
+        string[] path = page.AbsolutePath.Trim('/').Split('/');
+        if (path is not ["listen", { Length: > 0 } slug, { Length: 8 } id] ||
+            !id.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_')) return null;
+        var audio = new Uri($"https://radio.garden/api/ara/content/listen/{id}/channel.mp3");
+        return new Link(audio, page, LinkKind.Audio, Label(Uri.UnescapeDataString(slug).Replace('-', ' ')), true);
+    }
 
     internal static Extracted Read(string text, string mime, Uri page, Link source, Uri site, CancellationToken token)
     {
@@ -35,7 +56,9 @@ internal static partial class Extraction
         bool directory = false;
         try
         {
-            if (trim.StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase) ||
+            if (page == SwedishRadioChannels)
+                SwedishRadio(trim);
+            else if (trim.StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase) ||
                 HasExtension(page, ".m3u", ".m3u8") && !trim.StartsWith('<'))
                 M3u(trim);
             else if (trim.StartsWith("[playlist]", StringComparison.OrdinalIgnoreCase))
@@ -47,7 +70,7 @@ internal static partial class Extraction
             else
                 Html(trim);
         }
-        catch (Exception e) when (e is RegexMatchTimeoutException or XmlException) { }
+        catch (Exception e) when (e is RegexMatchTimeoutException or XmlException or JsonException) { }
         return new(hls, directory, links);
 
         void Add(string? value, LinkKind kind, string? name = null, bool hint = false, Uri? relative = null,
@@ -69,10 +92,54 @@ internal static partial class Extraction
             else if (explicitAudio || LikelyAudio(uri)) Add(raw, LinkKind.Audio, name, explicitAudio, relative);
         }
 
+        void SwedishRadio(string body)
+        {
+            using var json = JsonDocument.Parse(body);
+            if (json.RootElement.ValueKind != JsonValueKind.Object ||
+                !json.RootElement.TryGetProperty("channels", out var channels) ||
+                channels.ValueKind != JsonValueKind.Array) return;
+            foreach (var channel in channels.EnumerateArray())
+            {
+                token.ThrowIfCancellationRequested();
+                // The open directory includes event overflow slots that are usually off air.
+                if (channel.ValueKind != JsonValueKind.Object || StringProperty(channel, "channeltype") == "Extrakanaler" ||
+                    !channel.TryGetProperty("liveaudio", out var audio) || audio.ValueKind != JsonValueKind.Object ||
+                    !PublicNetwork.TryUrl(StringProperty(audio, "url") ?? "", null, out var uri) ||
+                    uri.Scheme != "https" || !uri.IsDefaultPort || !(IsSwedishRadioSite(uri) || uri.IdnHost == "live1.sr.se"))
+                    continue;
+                Add(uri.AbsoluteUri, LinkKind.Audio, StationName(StringProperty(channel, "name")), true,
+                    nameOrigin: NameOrigin.Directory);
+            }
+            directory = links.Count > 0;
+
+            static string? StringProperty(JsonElement item, string key) =>
+                item.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+        }
+
         void Html(string body)
         {
             var document = new HtmlParser().ParseDocument(body);
             var title = Label(document.Title) ?? source.Name;
+            int appEntryScripts = 0;
+            if (IsGlobalPlayer(page))
+            {
+                if (document.QuerySelector("script#__NEXT_DATA__") is IElement config)
+                {
+                    using var state = JsonDocument.Parse(config.TextContent);
+                    var playable = Property(Property(Property(state.RootElement, "props"), "pageProps"), "playable");
+                    ReadPlayerSources(Property(playable, "playback"), title, requirePublicFlag: true);
+                }
+                return;
+            }
+            foreach (var config in document.QuerySelectorAll("[data-widget-radioplayer] script[type='application/json']").Take(4))
+            {
+                try
+                {
+                    using var state = JsonDocument.Parse(config.TextContent);
+                    ReadPlayerSources(Property(state.RootElement, "fallback"), title, requirePublicFlag: false);
+                }
+                catch (JsonException) { }
+            }
             var baseUrl = page;
             if (document.QuerySelector("base[href]")?.GetAttribute("href") is string baseHref &&
                 PublicNetwork.TryUrl(baseHref, page, out var declared) && SameSite(declared, page)) baseUrl = declared;
@@ -152,15 +219,31 @@ internal static partial class Extraction
                     var type = element.GetAttribute("type") ?? "";
                     var property = element.GetAttribute("property") ?? "";
                     var descriptor = uri.AbsolutePath + " " + label;
+                    var linkTitle = element.GetAttribute("title") ?? "";
+                    bool publishedStream = element.LocalName == "a" && LikelyAudio(uri) &&
+                        page.AbsolutePath.Trim('/').ToLowerInvariant() is "streaming-urls" or "stream-links" or "streamadressen";
+                    bool directLink = element.LocalName == "a" && (SameSite(uri, site) || IsPlayerSubdomain(uri, site)) &&
+                        linkTitle.StartsWith("Direct stream", StringComparison.OrdinalIgnoreCase);
+                    if (directLink && linkTitle.Contains("subscription", StringComparison.OrdinalIgnoreCase)) continue;
                     Candidate(raw, label, type.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) ||
-                        property.StartsWith("og:audio", StringComparison.OrdinalIgnoreCase), baseUrl);
+                        property.StartsWith("og:audio", StringComparison.OrdinalIgnoreCase) || publishedStream || directLink, baseUrl);
+                    if (element.LocalName is "a" or "iframe" && (IsGlobalPlayer(uri) || IsGlobalRadioplayer(uri)))
+                        Add(raw, LinkKind.DedicatedPlayer, label, relative: baseUrl);
                     if (element.LocalName == "iframe" && ListenerLink(uri.AbsolutePath + " " + element.GetAttribute("title")) &&
                         !HostIs(uri, "youtube.com") && !HostIs(uri, "spotify.com")) Add(raw, LinkKind.Player, label, relative: baseUrl);
-                    if (element.LocalName == "a" && SameSite(uri, site) && ListenerLink(descriptor) &&
-                        !LikelyAudio(uri) && !Playlist(uri)) Add(raw, LinkKind.Player, label, relative: baseUrl);
-                    if (element.LocalName == "script" && SameSite(uri, site) &&
-                        ListenerLink(uri.AbsolutePath[(uri.AbsolutePath.LastIndexOf('/') + 1)..]))
-                        Add(raw, LinkKind.Script, title, relative: baseUrl);
+                    if (element.LocalName == "a" && (PrimaryListeningPage(uri) || ListenerLink(descriptor) || ListenerHelp(uri, label)) &&
+                        !LikelyAudio(uri) && !Playlist(uri)) AddPlayer(raw, uri, label, baseUrl);
+                    if (element.LocalName == "script" && IsSiteScript(uri))
+                    {
+                        var filename = uri.AbsolutePath[(uri.AbsolutePath.LastIndexOf('/') + 1)..];
+                        if (ListenerLink(filename)) Add(raw, LinkKind.Script, title, relative: baseUrl);
+                        else if (uri.IsDefaultPort && page.AbsolutePath == "/" && SameSite(uri, page) &&
+                                 appEntryScripts < 2 && AppEntryFile().IsMatch(filename))
+                        {
+                            Add(raw, LinkKind.Script, title, relative: baseUrl);
+                            appEntryScripts++;
+                        }
+                    }
                 }
 
                 foreach (var attribute in element.Attributes)
@@ -169,13 +252,39 @@ internal static partial class Extraction
                     bool audio = attribute.Name.Contains("stream", StringComparison.OrdinalIgnoreCase) ||
                         attribute.Name.Contains("audio", StringComparison.OrdinalIgnoreCase);
                     if (audio || attribute.Name is "data-src" or "data-url")
+                    {
+                        bool playerSource = audio || element.LocalName is "audio" or "source" ||
+                            PlayerContainer(element.GetAttribute("class")) || PlayerContainer(element.Id);
+                        if (playerSource)
+                        {
+                            var sources = AudioSourceSeparator().Split(attribute.Value, 9);
+                            if (sources.Length > 1)
+                            {
+                                foreach (var address in sources.Take(8)) Candidate(address, title, true, baseUrl);
+                                continue;
+                            }
+                        }
                         Candidate(attribute.Value, title, audio, baseUrl);
+                    }
                 }
             }
             foreach (var script in document.Scripts.Where(s => !s.HasAttribute("src")))
                 ScanText(script.TextContent, title);
             // Some station sites print the direct address as text instead of a link.
             ScanText(document.Body?.TextContent ?? "", title, playerCode: false);
+        }
+
+        void ReadPlayerSources(JsonElement values, string? title, bool requirePublicFlag)
+        {
+            if (values.ValueKind != JsonValueKind.Array) return;
+            foreach (var entry in values.EnumerateArray().Take(12))
+            {
+                var capability = Property(entry, "canUse");
+                if (requirePublicFlag && (capability.ValueKind != JsonValueKind.String || capability.GetString() != "true"))
+                    continue;
+                var address = Property(entry, "url");
+                if (address.ValueKind == JsonValueKind.String) Candidate(address.GetString()!, title, true);
+            }
         }
 
         void ScanText(string value, string? name, bool playerCode = true)
@@ -194,10 +303,22 @@ internal static partial class Extraction
             {
                 var path = match.Groups[1].Value;
                 var baseUri = source.Kind == LinkKind.Script ? source.FoundOn : page;
-                if (PublicNetwork.TryUrl(path, baseUri, out var target) && SameSite(target, site) && ListenerLink(target.AbsolutePath))
-                    Add(path, kind, name, relative: baseUri);
+                if (!PublicNetwork.TryUrl(path, baseUri, out var target) || !ListenerLink(target.AbsolutePath)) return;
+                if (kind == LinkKind.Script && IsSiteScript(target)) Add(path, kind, name, relative: baseUri);
+                else if (kind == LinkKind.Player) AddPlayer(path, target, name, baseUri);
             }
         }
+
+        void AddPlayer(string raw, Uri target, string? name, Uri relative)
+        {
+            if (IsPlayerSubdomain(target, site) ||
+                SameSite(target, site) && (PrimaryListeningPage(target) || ListenerHelp(target, name)))
+                Add(raw, LinkKind.DedicatedPlayer, name, relative: relative);
+            else if (SameSite(target, site)) Add(raw, LinkKind.Player, name, relative: relative);
+        }
+
+        bool IsSiteScript(Uri target) => SameSite(target, site) ||
+            (IsPlayerSubdomain(page, site) && SameSite(target, page));
 
         void M3u(string body)
         {
@@ -310,7 +431,41 @@ internal static partial class Extraction
         string.Equals(a.IdnHost, b.IdnHost, StringComparison.OrdinalIgnoreCase) ||
         string.Equals(a.IdnHost.TrimEnd('.'), "www." + b.IdnHost.TrimEnd('.'), StringComparison.OrdinalIgnoreCase) ||
         string.Equals(b.IdnHost.TrimEnd('.'), "www." + a.IdnHost.TrimEnd('.'), StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsPlayerSubdomain(Uri candidate, Uri site)
+    {
+        var siteHost = site.IdnHost.TrimEnd('.').ToLowerInvariant();
+        if (siteHost.StartsWith("www.", StringComparison.Ordinal)) siteHost = siteHost[4..];
+        var host = candidate.IdnHost.TrimEnd('.').ToLowerInvariant();
+        // Do not infer a shared parent domain or follow arbitrary sibling subdomains.
+        return host == "play." + siteHost || host == "player." + siteHost ||
+               host == "listen." + siteHost || host == "radio." + siteHost ||
+               host == "stream." + siteHost || host == "streams." + siteHost;
+    }
     private static bool SameOrigin(Uri a, Uri b) => a.Scheme == b.Scheme && a.Port == b.Port && a.IdnHost == b.IdnHost;
+    private static bool IsSwedishRadioSite(Uri uri) => uri.IdnHost is "sverigesradio.se" or "www.sverigesradio.se";
+    private static bool IsGlobalPlayer(Uri uri) => uri.IsDefaultPort && uri.IdnHost is "globalplayer.com" or "www.globalplayer.com" &&
+        uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries) is ["live", _, ..];
+    private static bool IsGlobalRadioplayer(Uri uri) => uri.IsDefaultPort && uri.IdnHost == "radioplayer.musicradio.com" &&
+        uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries) is ["radio", _, ..];
+    private static JsonElement Property(JsonElement value, string key) =>
+        value.ValueKind == JsonValueKind.Object && value.TryGetProperty(key, out var property) ? property : default;
+
+    private static bool PlayerContainer(string? value) => value != null &&
+        value.Split(' ', StringSplitOptions.RemoveEmptyEntries).Any(part =>
+            part.Equals("player", StringComparison.OrdinalIgnoreCase) ||
+            part.EndsWith("-player", StringComparison.OrdinalIgnoreCase));
+
+    private static bool PrimaryListeningPage(Uri uri) =>
+        uri.AbsolutePath.Trim('/').ToLowerInvariant() is
+            "listen" or "listen-live" or "how-to-listen" or "ways-to-listen" or "listen-online" or
+            "live" or "live-now" or "live-stream" or "livestream" or "livestreams" or "streaming-urls" or
+            "streams" or "player" or "radio-player" or "en-direct" or "direct" or "ao-vivo" or "en-vivo" or "direkt" ||
+        uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries).Contains("how-to-listen", StringComparer.OrdinalIgnoreCase);
+
+    private static bool ListenerHelp(Uri uri, string? name) =>
+        uri.AbsolutePath.Trim('/').ToLowerInvariant() is "help" or "faq" &&
+        name?.ToLowerInvariant() is "help" or "faq";
     private static bool HostIs(Uri uri, string host) => uri.IdnHost == host || uri.IdnHost.EndsWith("." + host, StringComparison.Ordinal);
     private static bool ListenerLink(string value) => new[] { "listen", "player", "stream", "live", "radio", "audio", "playout", "webcast", "tune-in", "tune in", "on-air" }
         .Any(term => value.Contains(term, StringComparison.OrdinalIgnoreCase));
