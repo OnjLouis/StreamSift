@@ -1,0 +1,279 @@
+import AppKit
+import Carbon.HIToolbox
+
+let functionOne = String(UnicodeScalar(NSF1FunctionKey)!)
+
+func label(_ title: String, for view: NSView, hint: String) {
+    view.setAccessibilityLabel(title)
+    view.setAccessibilityHelp(hint)
+}
+
+func scroll(_ document: NSView) -> NSScrollView {
+    let view = NSScrollView()
+    view.borderType = .bezelBorder
+    view.hasVerticalScroller = true
+    view.documentView = document
+    return view
+}
+
+func readOnlyText(_ title: String, hint: String) -> NSTextView {
+    let view = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 100))
+    view.isEditable = false
+    view.isSelectable = true
+    view.isHorizontallyResizable = false
+    view.isVerticallyResizable = true
+    view.autoresizingMask = [.width]
+    view.textContainer?.widthTracksTextView = true
+    view.textContainerInset = NSSize(width: 6, height: 5)
+    view.font = .systemFont(ofSize: NSFont.systemFontSize)
+    label(title, for: view, hint: hint)
+    return view
+}
+
+class KeyboardWindow: NSWindow {
+    var help: (() -> Void)?
+    var updates: (() -> Void)?
+    var project: (() -> Void)?
+    var cancel: (() -> Bool)?
+    var keyOrder: (() -> [NSView])?
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown {
+            let flags = event.modifierFlags.intersection([.control, .option, .shift, .command])
+            switch (Int(event.keyCode), flags) {
+            case (kVK_F1, []): if let help { help(); return }
+            case (kVK_F1, .shift): if let updates { updates(); return }
+            case (kVK_F1, .command), (kVK_F1, .control): if let project { project(); return }
+            case (kVK_Escape, []): if cancel?() == true { return }
+            case (kVK_Tab, []), (kVK_Tab, .shift):
+                if let controls = keyOrder?(), !controls.isEmpty {
+                    let reverse = flags == .shift
+                    let index = controls.firstIndex { $0 === focusedView }
+                    let next = index.map { ($0 + (reverse ? controls.count - 1 : 1)) % controls.count } ??
+                        (reverse ? controls.count - 1 : 0)
+                    makeFirstResponder(controls[next])
+                    return
+                }
+            default: break
+            }
+        }
+        super.sendEvent(event)
+    }
+
+    var focusedView: NSView? {
+        if let fieldEditor = firstResponder as? NSTextView, fieldEditor.isFieldEditor {
+            return fieldEditor.delegate as? NSView
+        }
+        return firstResponder as? NSView
+    }
+}
+
+final class SettingsTabs: NSTabView {
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        let flags = event.modifierFlags.intersection([.control, .option, .shift, .command])
+        guard flags.isEmpty, event.keyCode == kVK_LeftArrow || event.keyCode == kVK_RightArrow else {
+            super.keyDown(with: event)
+            return
+        }
+        let current = selectedTabViewItem.map(indexOfTabViewItem) ?? 0
+        let step = event.keyCode == kVK_LeftArrow ? -1 : 1
+        selectTabViewItem(at: (current + numberOfTabViewItems + step) % numberOfTabViewItems)
+    }
+}
+
+final class StreamTable: NSTableView {
+    var copyAddress: (() -> Void)?
+    var openPlayer: (() -> Void)?
+    var actionMenu: (() -> NSMenu?)?
+    var hasStreams = false
+
+    override var acceptsFirstResponder: Bool { hasStreams && super.acceptsFirstResponder }
+
+    @objc func copy(_ sender: Any?) { if selectedRow >= 0 { copyAddress?() } }
+
+    override func keyDown(with event: NSEvent) {
+        let flags = event.modifierFlags.intersection([.control, .option, .shift, .command])
+        if selectedRow >= 0 && (event.keyCode == kVK_Return || event.keyCode == kVK_ANSI_KeypadEnter) {
+            if flags == .shift { openPlayer?(); return }
+            if flags.isEmpty, let menu = actionMenu?() {
+                let cell = rect(ofRow: selectedRow)
+                menu.popUp(positioning: nil, at: NSPoint(x: cell.minX + 4, y: cell.maxY), in: self)
+                return
+            }
+        }
+        super.keyDown(with: event)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let index = row(at: convert(event.locationInWindow, from: nil))
+        if index >= 0 { selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
+        return selectedRow >= 0 ? actionMenu?() : nil
+    }
+
+    // VoiceOver's Show Menu action should open the same native menu as Return.
+    override func accessibilityPerformShowMenu() -> Bool {
+        guard selectedRow >= 0, let menu = actionMenu?() else { return false }
+        let cell = rect(ofRow: selectedRow)
+        menu.popUp(positioning: nil, at: NSPoint(x: cell.minX + 4, y: cell.maxY), in: self)
+        return true
+    }
+}
+
+@MainActor final class HelpPanel: NSObject {
+    private let panel: KeyboardWindow
+    private let body: NSTextView
+    private let manual: () -> Void
+
+    init(title: String, text: String, manual: @escaping () -> Void) {
+        self.manual = manual
+        panel = KeyboardWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 205),
+                               styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        body = readOnlyText("Help text", hint: "")
+        super.init()
+        panel.title = title
+        body.string = text
+        let open = NSButton(title: "Open Manual", target: self, action: #selector(openManual))
+        let close = NSButton(title: "Close", target: self, action: #selector(closePanel))
+        panel.cancel = { [weak self] in self?.closePanel(); return true }
+        let box = scroll(body)
+        let buttons = NSStackView(views: [open, close])
+        let content = NSStackView(views: [box, buttons])
+        content.orientation = .vertical
+        content.alignment = .trailing
+        content.edgeInsets = NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
+        panel.contentView = content
+        box.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -28).isActive = true
+        box.setContentHuggingPriority(.defaultLow, for: .vertical)
+        body.nextKeyView = open
+        open.nextKeyView = close
+        close.nextKeyView = body
+        panel.keyOrder = { [weak body, weak open, weak close] in [body, open, close].compactMap { $0 } }
+    }
+
+    func present(on parent: NSWindow) {
+        let old = parent.firstResponder
+        parent.beginSheet(panel) { [self] response in
+            if let old { parent.makeFirstResponder(old) }
+            if response == .OK { manual() }
+        }
+        panel.makeFirstResponder(body)
+        body.setSelectedRange(NSRange(location: 0, length: 0))
+    }
+
+    @objc private func closePanel() { panel.sheetParent?.endSheet(panel, returnCode: .cancel) }
+    @objc private func openManual() { panel.sheetParent?.endSheet(panel, returnCode: .OK) }
+}
+
+@MainActor final class PreferencesWindow: NSObject, NSWindowDelegate {
+    let window: KeyboardWindow
+    private let tabs = SettingsTabs()
+    private let sounds = NSButton(checkboxWithTitle: "Search sounds", target: nil, action: nil)
+    private let updates = NSButton(checkboxWithTitle: "Check for updates at startup", target: nil, action: nil)
+    private let folder = NSTextField()
+    private let apply: (Preferences) -> Void
+    private let manual: () -> Void
+    private let soundsHint = "Play a sound when a search starts and another when it finishes."
+    private let folderHint = "Choose where Shift+Return saves playlists. Command+S starts its Save dialog in the same folder."
+    private let updateHint = "Check for a newer signed release when StreamSift opens. Updates are installed only after you choose Install Update."
+
+    init(current: Preferences, manual: @escaping () -> Void, apply: @escaping (Preferences) -> Void) {
+        self.manual = manual
+        self.apply = apply
+        window = KeyboardWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 250),
+                                styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        super.init()
+        window.title = "StreamSift Settings"
+        window.isReleasedWhenClosed = false
+        window.cancel = { [weak self] in self?.window.performClose(nil); return true }
+        window.help = { [weak self] in self?.showHelp() }
+        sounds.state = current.sounds ? .on : .off
+        updates.state = current.startupUpdates ? .on : .off
+        folder.stringValue = current.folder.path
+        folder.isBezeled = true
+        folder.isEditable = true
+        folder.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label("Search sounds", for: sounds, hint: soundsHint)
+        label("Check for updates at startup", for: updates, hint: updateHint)
+        label("Playlist folder", for: folder, hint: folderHint)
+        let browse = NSButton(title: "Browse...", target: self, action: #selector(browseFolder))
+        let reset = NSButton(title: "Use Default Folder", target: self, action: #selector(defaultFolder))
+        label("Browse", for: browse, hint: "Choose the playlist folder in Finder.")
+        label("Use Default Folder", for: reset, hint: "Use the StreamSift folder inside Music.")
+        let folderLabel = NSTextField(labelWithString: "Playlist folder:")
+        folderLabel.setAccessibilityServesAsTitleForUIElements([folder])
+        let row = NSStackView(views: [folderLabel, folder, browse])
+        let general = NSStackView(views: [sounds, row, reset])
+        general.orientation = .vertical
+        general.alignment = .leading
+        general.edgeInsets = NSEdgeInsets(top: 15, left: 15, bottom: 15, right: 15)
+        row.widthAnchor.constraint(equalTo: general.widthAnchor, constant: -30).isActive = true
+        let updateStack = NSStackView(views: [updates])
+        updateStack.orientation = .vertical
+        updateStack.alignment = .leading
+        updateStack.edgeInsets = general.edgeInsets
+        for (name, content) in [("General", general), ("Updates", updateStack)] {
+            let tab = NSTabViewItem(identifier: name)
+            tab.label = name
+            tab.view = content
+            tabs.addTabViewItem(tab)
+        }
+        let ok = NSButton(title: "OK", target: self, action: #selector(accept))
+        ok.keyEquivalent = "\r"
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(dismiss))
+        let actions = NSStackView(views: [cancel, ok])
+        let content = NSStackView(views: [tabs, actions])
+        content.orientation = .vertical
+        content.alignment = .trailing
+        content.edgeInsets = NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
+        tabs.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -28).isActive = true
+        window.contentView = content
+        window.keyOrder = { [weak self, weak browse, weak reset, weak ok, weak cancel] in
+            guard let self, let ok, let cancel else { return [] }
+            let controls: [NSView?] = tabs.selectedTabViewItem?.identifier as? String == "Updates" ?
+                [tabs, updates, cancel, ok] : [tabs, sounds, folder, browse, reset, cancel, ok]
+            return controls.compactMap { $0 }
+        }
+        window.initialFirstResponder = tabs
+        window.center()
+    }
+
+    @objc private func dismiss() { window.performClose(nil) }
+    @objc private func browseFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Playlist Folder"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.directoryURL = URL(fileURLWithPath: folder.stringValue)
+        panel.beginSheetModal(for: window) { [weak self] response in
+            if response == .OK, let url = panel.url { self?.folder.stringValue = url.path }
+        }
+    }
+
+    @objc private func defaultFolder() { folder.stringValue = Preferences.defaultFolder.path }
+
+    @objc private func accept() {
+        let path = folder.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = Preferences.validFolder(path)
+        guard path.isEmpty || normalized != nil || URL(fileURLWithPath: path).standardizedFileURL.path == Preferences.defaultFolder.path else {
+            HelpPanel(title: "Playlist Folder", text: "Enter a full folder path or choose Browse.", manual: manual).present(on: window)
+            return
+        }
+        var chosen = Preferences()
+        chosen.sounds = sounds.state == .on
+        chosen.startupUpdates = updates.state == .on
+        chosen.customFolder = normalized
+        apply(chosen)
+        dismiss()
+    }
+
+    func showHelp() {
+        guard window.attachedSheet == nil else { return }
+        let focused = (NSApp.accessibilityFocusedUIElement as? NSView) ?? window.focusedView
+        let contents = focused?.accessibilityHelp().flatMap { $0.isEmpty ? nil : $0 } ??
+            "Set up search sounds, the playlist folder and update checks."
+        HelpPanel(title: focused?.accessibilityLabel() ?? "Settings Help", text: contents, manual: manual).present(on: window)
+    }
+}

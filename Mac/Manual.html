@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StreamSift for Mac</title>
+<style>
+body { max-width: 50rem; margin: 1rem auto; padding: 0 1rem; font: 1.05rem/1.5 system-ui, sans-serif; }
+dt { font-weight: bold; }
+dd { margin-bottom: .5rem; }
+</style>
+</head>
+<body>
+<main>
+<h1>StreamSift for Mac</h1>
+<nav aria-label="Contents">
+<ul>
+<li><a href="#changes">Version history</a></li>
+<li><a href="#find">Find a stream</a></li>
+<li><a href="#listen">Use a stream</a></li>
+<li><a href="#preferences">Settings</a></li>
+<li><a href="#keys">Keyboard shortcuts</a></li>
+<li><a href="#updates">Updates</a></li>
+<li><a href="#limits">Limits and privacy</a></li>
+<li><a href="#credits">Credits and support</a></li>
+</ul>
+</nav>
+<h2 id="changes">Version history</h2>
+<h3>1.0.0</h3>
+<p>Initial release for Windows and Mac. Find and verify live streams, copy their addresses, and save or open them in a player.</p>
+<h2 id="find">Find a stream</h2>
+<p>StreamSift runs on Intel and Apple Silicon Macs with macOS 13 or later. Unzip the download, then move StreamSift to Applications.</p>
+<p>Paste a station website, a player page, a playlist address or a direct stream URL, and press Return. StreamSift follows likely listening links and checks the audio it finds. M3U, PLS and XSPF files are lists of addresses: StreamSift shows the verified streams inside them, not one result per playlist file. Several entries can be different qualities or formats of the same station.</p>
+<p>When results are ready, focus moves to the first stream unless you moved away from the search controls. Use the arrow keys in the Streams list, then Tab to Stream details for the full address and the page or playlist it came from. If no stream is found, try the station's dedicated Listen Live or How to Listen page. Press Escape to cancel a search.</p>
+<p>StreamSift plays a short sound when a search starts and another when it finishes, including when nothing is found. Status announcements still work when sounds are off.</p>
+<h2 id="listen">Use a stream</h2>
+<ul>
+<li><strong>Copy stream address:</strong> Paste the direct URL into a player that supports web streams.</li>
+<li><strong>Save playlist:</strong> Choose a file name and location for the selected stream's M3U8 playlist. The dialog starts in the playlist folder from Settings.</li>
+<li><strong>Open in default player:</strong> Save the selected stream in the playlist folder without asking for a name, then open it with the Mac app associated with <code>.m3u8</code> files. Existing playlists are not overwritten. If macOS cannot open the file, the playlist stays saved.</li>
+
+</ul>
+<h2 id="preferences">Settings</h2>
+<p>Choose StreamSift, Settings or press Command+,.</p>
+<p>On the General tab, turn search sounds on or off, or choose the playlist folder. The default is the <code>StreamSift</code> folder inside Music. The folder is created when you first save a playlist there.</p>
+<p>On the Updates tab, turn on Check for updates at startup to receive a notice when a newer version is available. This is off by default and does not install anything automatically.</p>
+<h2 id="keys">Keyboard shortcuts</h2>
+<dl>
+<dt>Return in Website address</dt><dd>Find streams and move to the results when ready.</dd>
+<dt>Command+Return</dt><dd>Find streams.</dd>
+<dt>Escape</dt><dd>Cancel the current search or close a dialog.</dd>
+<dt>Return, right-click or VO+Shift+M on a result</dt><dd>Open the result's context menu.</dd>
+<dt>Command+C in Streams</dt><dd>Copy the selected stream address. In an edit field, Command+C copies selected text as usual.</dd>
+<dt>Command+S</dt><dd>Save a playlist for the selected stream.</dd>
+<dt>Shift+Return on a result</dt><dd>Save a playlist and open it in the Mac default app for M3U8 files.</dd>
+<dt>Command+,</dt><dd>Open Settings.</dd>
+<dt>Command+N</dt><dd>Clear the search and return to Website address.</dd>
+<dt>F1</dt><dd>Read help for the focused control. The help dialog also has an Open Manual button.</dd>
+<dt>Shift+F1</dt><dd>Check for updates.</dd>
+<dt>Command+F1</dt><dd>Open the GitHub project.</dd>
+</dl>
+<h2 id="updates">Updates</h2>
+<p>Use StreamSift, Check for Updates to look for a newer signed version. An update installs only after you choose Install Update, and StreamSift then reopens. Your preferences and saved playlists are preserved.</p>
+<h2 id="limits">Limits and privacy</h2>
+<p>StreamSift works with public HTTP and HTTPS links. It reads page and player metadata and common playlist formats, such as M3U, PLS, XSPF and ASX. It can test MP3, MP2, AAC, Ogg Opus, Ogg Vorbis, FLAC and WAV streams and recognise unencrypted live audio HLS playlists. For HLS it checks the playlist, not the individual audio segments. Some players may not support HLS. A stream may go off air later, and some URLs are temporary or work only in certain regions.</p>
+<p>A search has request, size and time limits. StreamSift does not execute page JavaScript, use your cookies or sign in. It cannot find all browser-generated URLs or play signed-in, DRM-protected or restricted streams. It does not scan local network addresses.</p>
+<p>Web requests go directly to the site and the addresses checked, without a search service or an account. The app does not save search or playback history. If you copy, export or send a URL to another app, that app may save the full address, including any parameters.</p>
+<h2 id="credits">Credits and support</h2>
+<p>StreamSift is by Andre Louis. HTML parsing uses <a href="https://github.com/AngleSharp/AngleSharp">AngleSharp</a>, licensed under the MIT License.</p>
+<p><a href="https://onj.me/contact">Contact Andre</a> or <a href="https://onj.me/donate">support development</a>.</p>
+</main>
+</body>
+</html>

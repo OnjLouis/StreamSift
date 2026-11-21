@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StreamSift for Windows</title>
+<style>
+body { max-width: 50rem; margin: 1rem auto; padding: 0 1rem; font: 1.05rem/1.5 system-ui, sans-serif; }
+dt { font-weight: bold; }
+dd { margin-bottom: .5rem; }
+</style>
+</head>
+<body>
+<main>
+<h1>StreamSift for Windows</h1>
+<nav aria-label="Contents">
+<ul>
+<li><a href="#changes">Version history</a></li>
+<li><a href="#find">Find a stream</a></li>
+<li><a href="#listen">Use a stream</a></li>
+<li><a href="#preferences">Preferences</a></li>
+<li><a href="#keys">Keyboard shortcuts</a></li>
+<li><a href="#updates">Updates</a></li>
+<li><a href="#limits">Limits and privacy</a></li>
+<li><a href="#credits">Credits and support</a></li>
+</ul>
+</nav>
+<h2 id="changes">Version history</h2>
+<h3>1.0.0</h3>
+<p>Initial release for Windows and Mac. Find and verify live streams, copy their addresses, and save or open them in a player.</p>
+<h2 id="find">Find a stream</h2>
+<p>StreamSift runs on Windows 10 or 11, 64-bit. Install the <a href="https://dotnet.microsoft.com/en-us/download/dotnet/10.0">.NET 10 Desktop Runtime (x64)</a> if it is not already installed. Extract the StreamSift ZIP into its own folder and open StreamSift.exe.</p>
+<p>Paste a station website, a player page, a playlist address or a direct stream URL, and press Enter. StreamSift follows likely listening links and checks the audio it finds. M3U, PLS and XSPF files are lists of addresses: StreamSift shows the verified streams inside them, not one result per playlist file. Several entries can be different qualities or formats of the same station.</p>
+<p>When results are ready, focus moves to the first stream unless you moved away from the search controls. Use the arrow keys in the Streams list, then Tab to Stream details for the full address and the page or playlist it came from. If no stream is found, try the station's dedicated Listen Live or How to Listen page. Press Escape to cancel a search.</p>
+<p>StreamSift plays a short sound when a search starts and another when it finishes, including when nothing is found. Status announcements still work when sounds are off.</p>
+<h2 id="listen">Use a stream</h2>
+<ul>
+<li><strong>Copy stream address:</strong> Paste the direct URL into your player. In foobar2000, use File, Add Location.</li>
+<li><strong>Save playlist:</strong> Choose a file name and location for the selected stream's M3U8 playlist. The dialog starts in the playlist folder from Preferences.</li>
+<li><strong>Open in default player:</strong> Save the selected stream in the playlist folder without asking for a name, then open it with the Windows app associated with <code>.m3u8</code> files. Existing playlists are not overwritten. If Windows cannot open the file, the playlist stays saved.</li>
+<li><strong>Add to Foobar2000:</strong> Send the selected stream to Foobar2000 without asking it to start playback. Foobar2000 chooses the destination using its incoming-file settings. This command looks for an installed copy in Program Files. For a portable copy, use Add Location or import the saved playlist.</li>
+</ul>
+<h2 id="preferences">Preferences</h2>
+<p>Choose Options, Preferences or press Ctrl+,.</p>
+<p>On the General tab, turn search sounds on or off, or choose the playlist folder. The default is <code>User\Playlists</code> beside StreamSift. The folder is created when you first save a playlist there.</p>
+<p>On the Updates tab, turn on Check for updates at startup to receive a notice when a newer version is available. This is off by default and does not install anything automatically.</p>
+<h2 id="keys">Keyboard shortcuts</h2>
+<dl>
+<dt>Alt+W</dt><dd>Move to Website address.</dd>
+<dt>Enter in Website address</dt><dd>Find streams and move to the results when ready.</dd>
+<dt>Ctrl+Enter</dt><dd>Find streams.</dd>
+<dt>Escape</dt><dd>Cancel the current search or close a dialog.</dd>
+<dt>Enter, Application key or Shift+F10 on a result</dt><dd>Open the result's context menu.</dd>
+<dt>Ctrl+C in Streams</dt><dd>Copy the selected stream address. In an edit field, Ctrl+C copies selected text as usual.</dd>
+<dt>Ctrl+S</dt><dd>Save a playlist for the selected stream.</dd>
+<dt>Shift+Enter on a result</dt><dd>Save a playlist and open it in the Windows default app for M3U8 files.</dd>
+<dt>Ctrl+Shift+O</dt><dd>Add the selected stream to Foobar2000.</dd>
+<dt>Ctrl+,</dt><dd>Open Preferences.</dd>
+<dt>Ctrl+N</dt><dd>Clear the search and return to Website address.</dd>
+<dt>F1</dt><dd>Read help for the focused control. The help dialog also has an Open Manual button.</dd>
+<dt>Shift+F1</dt><dd>Check for updates.</dd>
+<dt>Ctrl+F1</dt><dd>Open the GitHub project.</dd>
+</dl>
+<h2 id="updates">Updates</h2>
+<p>Use Help, Check for updates to look for a newer signed version. An update installs only after you choose Install update, and StreamSift then reopens. Your preferences and saved playlists are preserved.</p>
+<h2 id="limits">Limits and privacy</h2>
+<p>StreamSift works with public HTTP and HTTPS links. It reads page and player metadata and common playlist formats, such as M3U, PLS, XSPF and ASX. It can test MP3, MP2, AAC, Ogg Opus, Ogg Vorbis, FLAC and WAV streams and recognise unencrypted live audio HLS playlists. For HLS it checks the playlist, not the individual audio segments. Some players may not support HLS. A stream may go off air later, and some URLs are temporary or work only in certain regions.</p>
+<p>A search has request, size and time limits. StreamSift does not execute page JavaScript, use your cookies or sign in. It cannot find all browser-generated URLs or play signed-in, DRM-protected or restricted streams. It does not scan local network addresses.</p>
+<p>Web requests go directly to the site and the addresses checked, without a search service or an account. The app does not save search or playback history. If you copy, export or send a URL to another app, that app may save the full address, including any parameters.</p>
+<h2 id="credits">Credits and support</h2>
+<p>StreamSift is by Andre Louis. HTML parsing uses <a href="https://github.com/AngleSharp/AngleSharp">AngleSharp</a>, and updates use <a href="https://github.com/OnjLouis/SignedUpdater">Onj Signed Updater</a>. Both libraries are licensed under the MIT License.</p>
+<p><a href="https://onj.me/contact">Contact Andre</a> or <a href="https://onj.me/donate">support development</a>.</p>
+</main>
+</body>
+</html>

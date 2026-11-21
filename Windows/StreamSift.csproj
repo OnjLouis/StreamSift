@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Version>1.0.0</Version>
+    <Product>StreamSift</Product>
+    <Company>OnjLouis</Company>
+    <StreamSiftUpdatePublicKey Condition="'$(StreamSiftUpdatePublicKey)' == ''">Assets/UpdatePublicKey.xml</StreamSiftUpdatePublicKey>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Core/Core.csproj" />
+    <InternalsVisibleTo Include="StreamSift.WindowsTests" />
+    <ProjectReference Include="../Vendor/Onj.SignedUpdater/Onj.SignedUpdater.csproj" />
+    <EmbeddedResource Include="Assets/search.wav" LogicalName="StreamSift.Sounds.search.wav" />
+    <EmbeddedResource Include="Assets/done.wav" LogicalName="StreamSift.Sounds.done.wav" />
+    <EmbeddedResource Include="$(StreamSiftUpdatePublicKey)" LogicalName="StreamSift.UpdatePublicKey.xml" Condition="'$(StreamSiftUpdatePublicKey)' != ''" />
+    <None Include="../Vendor/Onj.SignedUpdater/LICENSE" Link="SignedUpdater-LICENSE.txt" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="../Manual.html" Link="Manual.html" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="../AngleSharp-LICENSE.txt" Link="AngleSharp-LICENSE.txt" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
