@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="Tests" />
     <PackageReference Include="AngleSharp" Version="1.10.5" />
   </ItemGroup>
 </Project>

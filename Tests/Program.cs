@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Diagnostics.Tracing;
+using System.IO.Compression;
 using System.Text;
 using StreamSift;
 
@@ -10,10 +11,12 @@ if (args.Length >= 3 && args[0] == "--directory-live")
     var mode = new DirectoryDiscovery(directoryClient, args[1]);
     foreach (var input in args[2..])
     {
-        if (!PublicNetwork.TryInput(input, out var website)) throw new ArgumentException("Invalid public address.");
-        var found = await mode.FindAsync(website, CancellationToken.None);
-        Console.WriteLine($"{website.IdnHost}: {found.Stations.Count} verified directory match(es).");
-        foreach (var station in found.Stations.Take(4)) Console.WriteLine($"  {station.Name}, {station.Format}");
+        var found = SearchSequence.CanSearchStation(input) ? await mode.FindByNameAsync(input, CancellationToken.None) :
+            PublicNetwork.TryInput(input, out var website) ? await mode.FindAsync(website, CancellationToken.None) :
+            throw new ArgumentException("Invalid public address or station name.");
+        Console.WriteLine($"{input}: {found.Stations.Count} verified directory match(es); {found.Unreachable} unavailable.");
+        foreach (var station in found.Stations.Take(6))
+            Console.WriteLine($"  {station.Name}, {station.Format}, {station.FoundOn.IdnHost}");
     }
     return;
 }
@@ -83,6 +86,50 @@ void Require(bool condition, string message)
 {
     if (!condition) throw new Exception(message);
     checks++;
+}
+
+var fallbackUri = new Uri("https://radio.example/live");
+var fallbackHit = new SearchResult([new Station("Verified", fallbackUri, "MP3", 128, fallbackUri, false)], 2, 0, false);
+var fallbackMiss = new SearchResult([], 3, 1, true);
+foreach (var first in Enum.GetValues<SearchMethod>())
+{
+    var order = new List<SearchMethod>();
+    var result = await SearchSequence.RunAsync(first, true, (_, _) => Task.FromResult(order.Count == 3 ? fallbackHit : fallbackMiss),
+        CancellationToken.None, (method, number) => { order.Add(method); Require(number == order.Count, "Attempt numbering."); });
+    Require(order.SequenceEqual(new[] { first }.Concat(Enum.GetValues<SearchMethod>().Where(method => method != first))) &&
+        result.Method == order[2] && result.Attempts == 3 && result.FailedMethods == 0 &&
+        result.Result.Stations.Count == 1 && result.Result.Requests == 8 && result.Result.Unreachable == 2 && result.Result.LimitReached,
+        "Opt-in fallback tries both other methods in order and preserves the verified source and counts.");
+}
+
+int fallbackCalls = 0;
+var manual = await SearchSequence.RunAsync(SearchMethod.Directory, false, (_, _) =>
+    { fallbackCalls++; return Task.FromResult(fallbackMiss); }, CancellationToken.None);
+Require(manual.Attempts == 1 && fallbackCalls == 1 && manual.Result.Stations.Count == 0, "Manual mode never falls back.");
+var early = await SearchSequence.RunAsync(SearchMethod.Passive, true, (_, _) =>
+    { fallbackCalls++; return Task.FromResult(fallbackHit); }, CancellationToken.None);
+Require(early.Attempts == 1 && fallbackCalls == 2, "A first-method hit stops fallback.");
+var recovered = await SearchSequence.RunAsync(SearchMethod.Browser, true, (mode, _) => mode switch
+{
+    SearchMethod.Browser => throw new InvalidOperationException("Browser not installed."),
+    SearchMethod.Passive => throw new OperationCanceledException("Method deadline elapsed."),
+    _ => Task.FromResult(fallbackHit)
+}, CancellationToken.None);
+Require(recovered.Attempts == 3 && recovered.FailedMethods == 2 && recovered.Method == SearchMethod.Directory &&
+    recovered.Result.Stations.Count == 1, "Recover from unavailable browser or method timeout.");
+var unavailable = await SearchSequence.RunAsync(SearchMethod.Passive, true, (_, _) => throw new HttpRequestException(), CancellationToken.None);
+Require(unavailable.Result.Stations.Count == 0 && unavailable.FailedMethods == 3, "All failed methods are reported without claiming a verified result.");
+using (var stop = new CancellationTokenSource())
+{
+    int attempts = 0;
+    try
+    {
+        await SearchSequence.RunAsync(SearchMethod.Passive, true, (_, _) =>
+            { attempts++; stop.Cancel(); return Task.FromResult(fallbackMiss); }, stop.Token);
+        throw new Exception("Cancelled search returned a result.");
+    }
+    catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+    Require(attempts == 1, "Cancelling prevents every further method.");
 }
 foreach (var text in new[] { "https://localhost/", "http://127.1/", "http://2130706433/", "http://[::ffff:127.0.0.1]/",
     "http://169.254.169.254/", "http://192.168.1.1/", "http://[fd01:234::1]/", "http://[2002:7f00:1::1]/",
@@ -322,19 +369,85 @@ Require(global.Stations is [{ Name: "Global fixture" }] &&
         "https://open.example/fixture-live"}),
     "Follow only the advertised Global Player live route and probe only its public streams.");
 
+const string secureHome = "https://country-fixture.example/";
+const string securePlayer = "https://streamdb9web.securenetsystems.net/cirruscontent/TESTFM";
+const string secureStable = "https://ice42.securenetsystems.net/TESTFM";
+handler.Text(secureHome, """
+    <title>Country 99</title><a href="https://streamdb9web.securenetsystems.net/cirruscontent/TESTFM">Listen Live</a>
+    <iframe src="https://streamdb9web.securenetsystems.net.evil.example/cirruscontent/TESTFM"></iframe>
+    """);
+handler.Text(securePlayer, """
+    <script>
+    var streamSRC = "https://ice42.securenetsystems.net/TESTFM?playSessionID=fixture";
+    var streamSrcDB = 'https://ice42.securenetsystems.net/TESTFM';
+    </script>
+    """);
+handler.Audio(secureStable, mp3, "Generic hosting service");
+int beforeSecure = handler.Seen.Count;
+var secure = await engine.FindAsync(new Uri(secureHome), CancellationToken.None);
+Require(secure.Stations is [{ Name: "Country 99" }] && secure.Stations[0].Url.AbsoluteUri == secureStable &&
+    handler.Seen.Skip(beforeSecure).SequenceEqual([secureHome, securePlayer, secureStable]),
+    "Resolve an official SecureNet player to its verified stable stream, retaining the homepage station name.");
+
+const string tritonPage = "https://player.listenlive.co/12345";
+const string tritonApi = "https://playerservices.streamtheworld.com/api/livestream?version=1.9&station=TESTFM";
+const string tritonRoot = "https://playerservices.streamtheworld.com/api/livestream-redirect/";
+handler.Text(tritonPage, """<meta name="application-name" content="TESTFM"><title>TESTFM</title>""");
+handler.Text(tritonApi, """
+    <live_stream_config xmlns="http://provisioning.streamtheworld.com/player/livestream-1.9"><mountpoints>
+      <mountpoint>
+        <status><status-code>200</status-code></status><mount>TESTFM</mount>
+        <media-format><audio codec="mp3"/></media-format><authentication>0</authentication>
+        <servers><server><ip>unrelated.example</ip></server></servers>
+      </mountpoint>
+      <mountpoint>
+        <status><status-code>200</status-code></status><mount>TESTFMAAC</mount>
+        <media-format><audio codec="heaacv2"/></media-format><authentication>0</authentication>
+      </mountpoint>
+      <mountpoint>
+        <status><status-code>200</status-code></status><mount>TESTPRIVATE</mount>
+        <media-format><audio codec="mp3"/></media-format><authentication>1</authentication>
+      </mountpoint>
+    </mountpoints></live_stream_config>
+    """, "application/xml");
+handler.Redirect(tritonRoot + "TESTFM.mp3", "https://edge.live.streamtheworld.com/TESTFM.mp3");
+handler.Audio("https://edge.live.streamtheworld.com/TESTFM.mp3", mp3);
+handler.Fail(tritonRoot + "TESTFMAAC.aac", HttpStatusCode.Forbidden);
+int beforeTriton = handler.Seen.Count;
+var triton = await engine.FindAsync(new Uri(tritonPage), CancellationToken.None);
+Require(triton.Stations is [{ Name: "TESTFM", Format: "MP3" }] &&
+    triton.Stations[0].Url.AbsoluteUri == tritonRoot + "TESTFM.mp3" &&
+    handler.Seen.Skip(beforeTriton).SequenceEqual([tritonPage, tritonApi, tritonRoot + "TESTFM.mp3",
+        "https://edge.live.streamtheworld.com/TESTFM.mp3", tritonRoot + "TESTFMAAC.aac"]),
+    "Only verify public advertised Triton mounts; keep the durable provider address, not a CDN edge.");
+
 const string directoryApi = "https://de1.api.radio-browser.info/json/stations/search?hidebroken=true&order=votes&reverse=true&limit=70000";
+const string iprdApi = "https://iprd-org.github.io/iprd/site_data/metadata/catalog.json";
 const string directoryHome = "https://www.directory-fixture.example/news";
 handler.Text(directoryApi, """
     [
       {"homepage":"http://directory-fixture.example/","name":"Other outlet on same site","url":"https://radio.example/other-live"},
       {"homepage":"http://directory-fixture.example/news/","name":"Named local news","url":"https://radio.example/main-mount"},
       {"homepage":"https://directory-fixture.example.evil.example/news","name":"Lookalike","url":"https://radio.example/wrong-live"},
-      {"homepage":"https://directory-fixture.example/news","name":"Private","url":"http://127.0.0.1/stream"}
+      {"homepage":"https://directory-fixture.example/news","name":"Private","url":"http://127.0.0.1/stream"},
+      {"homepage":"https://www.di.fm/trance","name":"Premium","url":"https://listen.di.fm/premium_high/trance.pls?listen_key=fixture"},
+      {"homepage":"https://www.di.fm/trance","name":"Other broadcaster","url":"https://somewhere.example/trance"},
+      {"homepage":"https://www.di.fm/trance","name":"Public candidate","url":"https://listen.di.fm/public3/trance.pls","url_resolved":"https://prem1.di.fm/trance?fixture"},
+      {"homepage":"https://directory-fixture.example/wtest","name":"WTEST-FM Harbour","url":"https://radio.example/wtest-live"}
     ]
     """, "application/json");
 handler.Redirect("https://radio.example/main-mount", "https://radio.example/current-edge");
 handler.Audio("https://radio.example/current-edge", mp3);
 handler.Audio("https://radio.example/other-live", mp3);
+handler.Audio("https://radio.example/wtest-live", mp3);
+handler.Audio("https://radio.example/wtest-extra", mp3);
+handler.Text(iprdApi, """
+    {"stations":[
+      {"name":"WTEST","website":"https://harbour-fixture.example/","streams":[{"url":"https://radio.example/wtest-extra"}]},
+      {"name":"AWTEST","website":"https://directory-fixture.example/","streams":[{"url":"https://radio.example/wrong-live"}]},
+      {"name":"WTEST Plus","website":"https://harbour-fixture.example/","streams":[{"url":"https://radio.example/wtest-live"}]}
+    ]}
+    """, "application/json");
 var directoryCache = Directory.CreateTempSubdirectory("streamsift-directory-test-");
 try
 {
@@ -356,8 +469,47 @@ try
     Require(missing.Stations.Count == 0 && handler.Seen.Count == beforeMissing,
         "A missing channel must not offer another outlet from the same network.");
     var network = await lookup.FindAsync(new Uri("https://directory-fixture.example/"), CancellationToken.None);
-    Require(network.Stations.Select(station => station.Name).ToHashSet().SetEquals(["Other outlet on same site", "Named local news"]),
+    Require(network.Stations.Select(station => station.Name).ToHashSet().SetEquals(["Other outlet on same site", "Named local news", "WTEST-FM Harbour"]),
         "A network homepage can offer multiple named outlets.");
+    handler.Fail("https://listen.di.fm/public3/trance.pls", HttpStatusCode.NotFound);
+    int beforeDi = handler.Seen.Count;
+    var di = await lookup.FindAsync(new Uri("https://www.di.fm/trance"), CancellationToken.None);
+    Require(di.Stations.Count == 0 && handler.Seen.Skip(beforeDi).SequenceEqual(["https://listen.di.fm/public3/trance.pls"]),
+        "Neither subscriber entries nor unrelated directory rows count as DI.FM streams, even from cache.");
+    Require(!PublicNetwork.TryUrl("https://prem2.di.fm/trance?fixture", null, out _) &&
+        !PublicNetwork.TryUrl("https://listen.di.fm/trance?%6cisten_key=fixture", null, out _) &&
+        PublicNetwork.TryUrl("https://elsewhere.example/live?token=public-selector", null, out _),
+        "Keep known DI.FM subscriber routes out of verification without stripping public stream parameters.");
+    int beforeName = handler.Seen.Count;
+    var byName = await lookup.FindByNameAsync("wtest", CancellationToken.None);
+    Require(byName.Stations.Select(station => station.Name).ToHashSet().SetEquals(["WTEST", "WTEST-FM Harbour"]) &&
+        byName.Stations[0].FoundOn.IdnHost == "iprd-org.github.io" &&
+        handler.Seen.Skip(beforeName).SequenceEqual([iprdApi, "https://radio.example/wtest-extra", "https://radio.example/wtest-live"]),
+        "Search both catalogues locally, rank exact matches first, preserve the source and do not resend duplicate streams.");
+    int beforeWarmName = handler.Seen.Count;
+    await lookup.FindByNameAsync("WTEST", CancellationToken.None);
+    Require(!handler.Seen.Skip(beforeWarmName).Contains(iprdApi) &&
+        SearchSequence.CanSearchStation("104.3") && SearchSequence.CanSearchStation("BBC Radio 4") &&
+        !SearchSequence.CanSearchStation("https://127.0.0.1/path") && !SearchSequence.CanSearchStation("prem1.di.fm"),
+        "Reuse the secondary catalogue and distinguish station names from addresses.");
+
+    // Files from the released version may predate the new writer-side validation.
+    var oldCachePath = Path.Combine(directoryCache.FullName, "radio-browser-v1.json.gz");
+    using (var file = File.Create(oldCachePath))
+    using (var zip = new GZipStream(file, CompressionMode.Compress))
+    using (var writer = new StreamWriter(zip))
+        writer.Write("""
+            [
+              {"homepage":"https://www.di.fm/trance","name":"Old subscriber entry","url":"https://prem1.di.fm/trance?fixture"},
+              {"homepage":"https://www.di.fm/trance","name":"Wrong broadcaster","url":"https://somewhere.example/live"},
+              {"homepage":"https://www.di.fm/trance","name":"Old alternate","url":"https://listen.di.fm/public3/trance.pls","url_resolved":"https://prem2.di.fm/trance?fixture"}
+            ]
+            """);
+    int beforeOldCache = handler.Seen.Count;
+    var fromOldCache = await lookup.FindAsync(new Uri("https://www.di.fm/trance"), CancellationToken.None);
+    Require(fromOldCache.Stations.Count == 0 &&
+        handler.Seen.Skip(beforeOldCache).SequenceEqual(["https://listen.di.fm/public3/trance.pls"]),
+        "Existing caches cannot reintroduce member feeds or mismatched station identities.");
 }
 finally { directoryCache.Delete(recursive: true); }
 

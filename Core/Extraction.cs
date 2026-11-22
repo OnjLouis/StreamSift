@@ -28,9 +28,15 @@ internal static partial class Extraction
     [GeneratedRegex(@"^(?:main|app|index|bundle)(?:[.-][a-f0-9]{8,32})?(?:\.min)?\.(?:m?js)$",
         RegexOptions.IgnoreCase, 200)]
     private static partial Regex AppEntryFile();
+    [GeneratedRegex("""\b(?:var|let|const)\s+streamSrcDB\s*=\s*['"]([^'"]{1,2048})['"]""", RegexOptions.None, 200)]
+    private static partial Regex SecureNetStream();
 
     private const int MaxPageLinks = 100;
     private static readonly Uri SwedishRadioChannels = new("https://api.sr.se/api/v2/channels?format=json&pagination=false");
+    private const string TritonHost = "playerservices.streamtheworld.com";
+    private const string TritonProvisioning = "/api/livestream";
+    private const string TritonRedirect = "/api/livestream-redirect/";
+    private static readonly XNamespace TritonSchema = "http://provisioning.streamtheworld.com/player/livestream-1.9";
     internal sealed record Extracted(bool LiveHls, bool IsDirectory, List<Link> Links);
 
     internal static Uri? OfficialCatalogue(Uri page) =>
@@ -58,6 +64,9 @@ internal static partial class Extraction
         {
             if (page == SwedishRadioChannels)
                 SwedishRadio(trim);
+            else if (page.Scheme == "https" && page.IsDefaultPort && page.IdnHost == TritonHost &&
+                     page.AbsolutePath == TritonProvisioning)
+                TritonMounts(trim);
             else if (trim.StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase) ||
                 HasExtension(page, ".m3u", ".m3u8") && !trim.StartsWith('<'))
                 M3u(trim);
@@ -74,13 +83,13 @@ internal static partial class Extraction
         return new(hls, directory, links);
 
         void Add(string? value, LinkKind kind, string? name = null, bool hint = false, Uri? relative = null,
-            NameOrigin nameOrigin = NameOrigin.Inferred, Uri? wrapper = null)
+            NameOrigin nameOrigin = NameOrigin.Inferred, Uri? wrapper = null, bool keepAddress = false)
         {
             token.ThrowIfCancellationRequested();
             if (value == null || links.Count >= MaxPageLinks || value.TrimStart().StartsWith('#') ||
                 !PublicNetwork.TryUrl(WebUtility.HtmlDecode(value), relative ?? page, out var uri) ||
                 uri == page || !seen.Add(uri.AbsoluteUri)) return;
-            links.Add(new Link(uri, page, kind, name, hint, nameOrigin, wrapper));
+            links.Add(new Link(uri, page, kind, name, hint, nameOrigin, wrapper, keepAddress));
         }
 
         void Candidate(string raw, string? name, bool explicitAudio = false, Uri? relative = null)
@@ -121,6 +130,29 @@ internal static partial class Extraction
             var document = new HtmlParser().ParseDocument(body);
             var title = Label(document.Title) ?? source.Name;
             int appEntryScripts = 0;
+            if (SecureNetCallSign(page) is string callSign)
+            {
+                foreach (var script in document.Scripts.Where(s => !s.HasAttribute("src")))
+                {
+                    var match = SecureNetStream().Match(script.TextContent);
+                    if (!match.Success || !PublicNetwork.TryUrl(match.Groups[1].Value, page, out var audio) ||
+                        !HostIs(audio, "securenetsystems.net") || !audio.IsDefaultPort || audio.Scheme != "https" ||
+                        audio.Query.Length != 0 || !audio.AbsolutePath.Trim('/').Equals(callSign, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    Add(audio.AbsoluteUri, LinkKind.Audio, source.Name ?? callSign, true, nameOrigin: NameOrigin.Directory,
+                        keepAddress: true);
+                    return;
+                }
+                return;
+            }
+            if (IsTritonPlayer(page))
+            {
+                string? station = document.QuerySelector("meta[name='application-name']")?.GetAttribute("content");
+                if (ProviderIdentifier(station))
+                    Add($"https://{TritonHost}{TritonProvisioning}?version=1.9&station={station}",
+                        LinkKind.DedicatedPlayer, source.Name ?? station);
+                return;
+            }
             if (IsGlobalPlayer(page))
             {
                 if (document.QuerySelector("script#__NEXT_DATA__") is IElement config)
@@ -229,6 +261,8 @@ internal static partial class Extraction
                         property.StartsWith("og:audio", StringComparison.OrdinalIgnoreCase) || publishedStream || directLink, baseUrl);
                     if (element.LocalName is "a" or "iframe" && (IsGlobalPlayer(uri) || IsGlobalRadioplayer(uri)))
                         Add(raw, LinkKind.DedicatedPlayer, label, relative: baseUrl);
+                    else if (element.LocalName is "a" or "iframe" && (SecureNetCallSign(uri) != null || IsTritonPlayer(uri)))
+                        Add(raw, LinkKind.DedicatedPlayer, title, relative: baseUrl);
                     if (element.LocalName == "iframe" && ListenerLink(uri.AbsolutePath + " " + element.GetAttribute("title")) &&
                         !HostIs(uri, "youtube.com") && !HostIs(uri, "spotify.com")) Add(raw, LinkKind.Player, label, relative: baseUrl);
                     if (element.LocalName == "a" && (PrimaryListeningPage(uri) || ListenerLink(descriptor) || ListenerHelp(uri, label)) &&
@@ -272,6 +306,37 @@ internal static partial class Extraction
                 ScanText(script.TextContent, title);
             // Some station sites print the direct address as text instead of a link.
             ScanText(document.Body?.TextContent ?? "", title, playerCode: false);
+        }
+
+        void TritonMounts(string body)
+        {
+            using var reader = XmlReader.Create(new StringReader(body), new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null
+            });
+            var root = XDocument.Load(reader).Root;
+            if (root?.Name != TritonSchema + "live_stream_config") return;
+            foreach (var mount in root.Element(TritonSchema + "mountpoints")?.Elements(TritonSchema + "mountpoint").Take(8) ?? [])
+            {
+                string? name = (string?)mount.Element(TritonSchema + "mount");
+                var auth = (string?)mount.Element(TritonSchema + "authentication");
+                if (!ProviderIdentifier(name) ||
+                    (string?)mount.Element(TritonSchema + "status")?.Element(TritonSchema + "status-code") != "200" ||
+                    auth != "0")
+                    continue;
+                string? codec = (string?)mount.Element(TritonSchema + "media-format")
+                    ?.Element(TritonSchema + "audio")?.Attribute("codec");
+                var extension = codec?.ToLowerInvariant() switch
+                {
+                    "mp3" => ".mp3",
+                    "aaclc" or "heaacv1" or "heaacv2" => ".aac",
+                    _ => null
+                };
+                // Keep the documented redirector instead of freezing the current edge server.
+                if (extension != null)
+                    Add($"https://{TritonHost}{TritonRedirect}{name}{extension}", LinkKind.Audio,
+                        source.Name ?? name, true, nameOrigin: NameOrigin.Directory, keepAddress: true);
+            }
         }
 
         void ReadPlayerSources(JsonElement values, string? title, bool requirePublicFlag)
@@ -467,6 +532,20 @@ internal static partial class Extraction
         uri.AbsolutePath.Trim('/').ToLowerInvariant() is "help" or "faq" &&
         name?.ToLowerInvariant() is "help" or "faq";
     private static bool HostIs(Uri uri, string host) => uri.IdnHost == host || uri.IdnHost.EndsWith("." + host, StringComparison.Ordinal);
+
+    private static bool ProviderIdentifier(string? value) =>
+        value is { Length: > 0 and <= 40 } && value.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-');
+
+    private static string? SecureNetCallSign(Uri uri)
+    {
+        if (!uri.IsDefaultPort || !HostIs(uri, "securenetsystems.net")) return null;
+        return uri.AbsolutePath.Trim('/').Split('/') is ["cirruscontent" or "v5", var callSign] &&
+            ProviderIdentifier(callSign) ? callSign : null;
+    }
+
+    private static bool IsTritonPlayer(Uri uri) =>
+        uri.IsDefaultPort && uri.IdnHost == "player.listenlive.co" &&
+        uri.AbsolutePath.Trim('/') is { Length: > 0 and <= 12 } id && id.All(char.IsAsciiDigit);
     private static bool ListenerLink(string value) => new[] { "listen", "player", "stream", "live", "radio", "audio", "playout", "webcast", "tune-in", "tune in", "on-air" }
         .Any(term => value.Contains(term, StringComparison.OrdinalIgnoreCase));
     private static bool LikelyAudio(Uri uri) =>

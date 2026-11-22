@@ -9,7 +9,7 @@ public sealed record SearchResult(IReadOnlyList<Station> Stations, int Requests,
 internal enum LinkKind { Audio, Playlist, Player, DedicatedPlayer, Script, Catalogue }
 internal enum NameOrigin { Inferred, Directory, Playlist }
 internal sealed record Link(Uri Url, Uri FoundOn, LinkKind Kind, string? Name = null, bool AudioHint = false,
-    NameOrigin NameOrigin = NameOrigin.Inferred, Uri? Wrapper = null);
+    NameOrigin NameOrigin = NameOrigin.Inferred, Uri? Wrapper = null, bool KeepAddress = false);
 
 public sealed class Discovery(HttpClient client)
 {
@@ -172,7 +172,7 @@ public sealed class Discovery(HttpClient client)
             var title = stable?.Name ?? Extraction.StationName(name) ?? Extraction.StationName(source.Name) ??
                 Extraction.Label(address.Segments.LastOrDefault()?.Trim('/')) ?? address.Host;
             var key = SomaMount(address) ?? address.AbsoluteUri;
-            var playbackAddress = observed != null && source.Kind == LinkKind.Audio
+            var playbackAddress = source.KeepAddress || (observed != null && source.Kind == LinkKind.Audio)
                 ? source.Url : address;
             var station = new Station(title, playbackAddress, format, bitrate, stable?.FoundOn ?? source.FoundOn, hls);
             if (!results.TryAdd(key, station) && address.Scheme == "https" && results[key].Url.Scheme == "http") results[key] = station;

@@ -64,14 +64,15 @@ import UniformTypeIdentifiers
             self?.cancelSearch()
             return true
         }
-        let caption = NSTextField(labelWithString: "Website address:")
+        let caption = NSTextField(labelWithString: "Website address or station name:")
         caption.setAccessibilityServesAsTitleForUIElements([address])
         address.isBezeled = true
         address.target = self
         address.action = #selector(findStreams)
         address.delegate = self
         address.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        label("Website address", for: address, hint: "Paste a public station page, playlist or stream address. Press Return to search.")
+        label("Website address or station name", for: address,
+              hint: "Enter a public website, stream address, station name or call sign.")
         find.target = self
         find.action = #selector(findStreams)
         findBrowser.target = self
@@ -285,7 +286,10 @@ import UniformTypeIdentifiers
         let input = address.currentEditor()?.string ?? address.stringValue
         let running = ScanJob()
         do {
-            try running.start(input, mode: mode) { [weak self] result in self?.finished(result, mode: mode) }
+            try running.start(input, mode: mode, fallback: preferences.automaticFallback, onFallback: { [weak self, weak running] next in
+                guard let self, job === running, !isCancelling else { return }
+                setStatus("Trying another method. " + next.starting)
+            }) { [weak self] result in self?.finished(result, mode: mode) }
             isCancelling = false
             job = running
             load([])
@@ -315,7 +319,8 @@ import UniformTypeIdentifiers
             switch result {
             case .success(let found):
                 load(found.stations)
-                message = mode.resultPrefix + found.summary
+                let prefix = found.stations.isEmpty && (found.attempts ?? 0) > 1 ? "Automatic search: " : (found.method ?? mode).resultPrefix
+                message = prefix + found.summary
                 if preferences.sounds { doneSound?.stop(); doneSound?.play() }
             case .failure(let error):
                 message = (error as? StreamError)?.errorDescription ?? StreamError.search.errorDescription ?? "Search failed."

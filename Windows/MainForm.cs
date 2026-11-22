@@ -6,7 +6,7 @@ namespace StreamSift;
 internal sealed class MainForm : Form
 {
     private readonly HttpClient client = PublicNetwork.CreateClient();
-    private readonly TextBox url = new() { AccessibleName = "Website address", Dock = DockStyle.Fill, MaxLength = 4096, TabIndex = 0 };
+    private readonly TextBox url = new() { AccessibleName = "Website address or station name", Dock = DockStyle.Fill, MaxLength = 4096, TabIndex = 0 };
     private readonly ShortcutButton find = new() { Text = "Find streams", ShortcutText = "Ctrl+Enter", AutoSize = true, TabIndex = 1 };
     private readonly ShortcutButton findBrowser = new() { Text = "Find with browser", ShortcutText = "Ctrl+Shift+Enter", AutoSize = true };
     private readonly ShortcutButton cancel = new() { Text = "Cancel", ShortcutText = "Esc", AutoSize = true, Enabled = false, TabIndex = 2 };
@@ -31,11 +31,9 @@ internal sealed class MainForm : Form
     private CancellationTokenSource? updateCheck;
     private CancellationTokenSource? startupUpdate;
     private bool pendingUpdateNotice;
-    private int requestCount;
     private bool closing;
-    private bool browserScan;
+    private bool waitForScanOnClose;
     private bool closeAfterScan;
-    private enum SearchMode { Passive, Browser, Directory }
 
     internal MainForm()
     {
@@ -57,9 +55,9 @@ internal sealed class MainForm : Form
         file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add(MenuCommand.Create("E&xit", Close));
         var actions = new ToolStripMenuItem("&Actions");
-        browserCommand = MenuCommand.Create("Find with browser", () => _ = FindAsync(SearchMode.Browser),
+        browserCommand = MenuCommand.Create("Find with browser", () => _ = FindAsync(SearchMethod.Browser),
             Keys.Control | Keys.Shift | Keys.Enter);
-        directoryCommand = MenuCommand.Create("Look up in public directory", () => _ = FindAsync(SearchMode.Directory),
+        directoryCommand = MenuCommand.Create("Look up in public directory", () => _ = FindAsync(SearchMethod.Directory),
             Keys.Control | Keys.Shift | Keys.D);
         copyCommand = MenuCommand.Create("Copy stream address", Copy, display: "Ctrl+C");
         foobarCommand = MenuCommand.Create("Add to Foobar2000", AddToFoobar, Keys.Control | Keys.Shift | Keys.F);
@@ -87,7 +85,7 @@ internal sealed class MainForm : Form
         entry.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         entry.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         entry.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        var urlLabel = new Label { Text = "&Website address:", Anchor = AnchorStyles.Left, AutoSize = true, TabIndex = 0 };
+        var urlLabel = new Label { Text = "&Website address or station name:", Anchor = AnchorStyles.Left, AutoSize = true, TabIndex = 0 };
         url.TabIndex = 1;
         find.TabIndex = 0;
         findBrowser.TabIndex = 1;
@@ -126,15 +124,15 @@ internal sealed class MainForm : Form
         Controls.Add(grid);
         Controls.Add(menus);
 
-        help[url] = "Enter or paste a public station website, player page or stream address. Press Enter to find streams.";
-        help[find] = "Scan this address for live audio without starting a web player.";
+        help[url] = "Enter a public website, stream address, station name or call sign. Press Enter to find streams.";
+        help[find] = "Scan the address for live audio, or look up a station name in public radio directories.";
         help[findBrowser] = "Look for live audio using a temporary, muted browser. Requires Chrome or Microsoft Edge.";
         help[cancel] = "Stop the current search. You can also press Escape.";
         help[results] = "Move with the arrow keys. Ctrl+C copies the stream address. Enter opens its context menu. Shift+Enter saves a playlist and opens it in your default player.";
         help[details] = "Review the stream address and the page where it was found. Ctrl+C copies selected text.";
         help[status] = "Review the last result or operation. A search with no results does not prove that the website has no live stream.";
         find.Click += async (_, _) => await FindAsync();
-        findBrowser.Click += async (_, _) => await FindAsync(SearchMode.Browser);
+        findBrowser.Click += async (_, _) => await FindAsync(SearchMethod.Browser);
         cancel.Click += (_, _) => scan?.Cancel();
         Shown += async (_, _) =>
         {
@@ -145,7 +143,7 @@ internal sealed class MainForm : Form
         FormClosing += (_, e) =>
         {
             if (updateCheck != null) { updateCheck.Cancel(); e.Cancel = true; return; }
-            if (browserScan && scan != null)
+            if (waitForScanOnClose && scan != null)
             {
                 closeAfterScan = true;
                 scan.Cancel();
@@ -174,16 +172,30 @@ internal sealed class MainForm : Form
     private static bool IsSearchKey(Keys key, bool inAddress) =>
         key == (Keys.Control | Keys.Enter) || (inAddress && key == Keys.Enter);
 
-    private async Task FindAsync(SearchMode mode = SearchMode.Passive)
+    private static string StartingSearch(SearchMethod method) => method switch
+    {
+        SearchMethod.Browser => "Searching with a temporary browser...",
+        SearchMethod.Directory => "Checking public radio directories...",
+        _ => "Searching the website..."
+    };
+
+    private async Task FindAsync(SearchMethod mode = SearchMethod.Passive)
     {
         if (scan != null || updateCheck != null) return;
-        if (!PublicNetwork.TryInput(url.Text, out var address))
+        var searchText = url.Text;
+        bool nameInput = SearchSequence.CanSearchStation(searchText);
+        bool hasAddress = PublicNetwork.TryInput(searchText, out var address) && !nameInput;
+        bool stationSearch = nameInput && mode != SearchMethod.Browser;
+        if (!hasAddress && !stationSearch)
         {
-            SetStatus("Enter a public HTTP or HTTPS address.");
+            SetStatus(mode == SearchMethod.Browser ? "Enter a public HTTP or HTTPS address." :
+                "Enter a public HTTP or HTTPS address, station name or call sign.");
             status.Focus();
             return;
         }
-        if (mode == SearchMode.Browser && !BrowserDiscovery.IsAvailable)
+        if (stationSearch) mode = SearchMethod.Directory;
+        var fallback = !stationSearch && preferences.AutomaticFallback;
+        if (mode == SearchMethod.Browser && !fallback && !BrowserDiscovery.IsAvailable)
         {
             SetStatus("Find with browser requires Chrome or Microsoft Edge.");
             status.Focus();
@@ -191,35 +203,32 @@ internal sealed class MainForm : Form
         }
         var operation = new CancellationTokenSource();
         scan = operation;
-        browserScan = mode == SearchMode.Browser;
+        waitForScanOnClose = fallback || mode != SearchMethod.Passive;
         bool focusCancel = find.Focused || findBrowser.Focused || results.Focused || details.Focused;
         cancel.Enabled = true;
         if (focusCancel) cancel.Focus();
         ClearResults();
-        requestCount = 0;
-        SetStatus(mode switch
-        {
-            SearchMode.Browser => "Searching with a temporary browser...",
-            SearchMode.Directory => "Checking the public radio directory...",
-            _ => "Searching..."
-        });
+        SetStatus(StartingSearch(mode));
         sounds.SearchStarted();
         url.ReadOnly = true;
         find.Enabled = findBrowser.Enabled = false;
         browserCommand.Enabled = false;
         directoryCommand.Enabled = false;
-        var progress = new Progress<int>(n => { if (scan == operation) requestCount = n; });
+        IProgress<SearchMethod> progress = new Progress<SearchMethod>(method =>
+        {
+            if (scan == operation && !operation.IsCancellationRequested)
+                SetStatus("Trying another method. " + StartingSearch(method));
+        });
         var focusResults = false;
         try
         {
-            var found = await Task.Run(() => mode switch
-            {
-                SearchMode.Browser => new BrowserDiscovery(client).FindAsync(address, operation.Token, progress),
-                SearchMode.Directory => new DirectoryDiscovery(client, Path.Combine(Preferences.UserDirectory, "Cache"))
-                    .FindAsync(address, operation.Token, progress),
-                _ => new Discovery(client).FindAsync(address, operation.Token, progress)
-            });
+            var sequence = new SearchSequence(client, Path.Combine(Preferences.UserDirectory, "Cache"));
+            var run = await Task.Run(() => stationSearch ? sequence.FindStationAsync(searchText, operation.Token) :
+                sequence.FindAsync(address, mode, fallback, operation.Token,
+                (method, number) => { if (number > 1) progress.Report(method); }));
             if (closing) return;
+            operation.Token.ThrowIfCancellationRequested();
+            var found = run.Result;
             results.BeginUpdate();
             try
             {
@@ -236,34 +245,36 @@ internal sealed class MainForm : Form
                 }
             }
             finally { results.EndUpdate(); }
-            var sourceLabel = mode switch
+            var sourceLabel = found.Stations.Count == 0 && run.Attempts > 1 ? "Automatic search: " : run.Method switch
             {
-                SearchMode.Browser => "Browser-assisted search: ",
-                SearchMode.Directory => "Public directory: ",
+                SearchMethod.Browser => "Browser-assisted search: ",
+                SearchMethod.Directory => "Public directory: ",
                 _ => ""
             };
             SetStatus(sourceLabel + (found.Stations.Count switch
                 { 0 => "No live streams verified.", 1 => "1 stream found.", _ => $"{found.Stations.Count} streams found." }) +
                 $" Checked {found.Requests} {(found.Requests == 1 ? "address" : "addresses")}." +
                 (found.Unreachable > 0 ? $" {found.Unreachable} unavailable." : "") +
-                (found.LimitReached ? " Search limit reached." : ""));
+                (found.LimitReached ? " Search limit reached." : "") +
+                (run.Attempts > 1 ? $" Tried {run.Attempts} methods." : "") +
+                (run.FailedMethods > 0 ? $" Methods that could not finish: {run.FailedMethods}." : ""));
             sounds.SearchCompleted();
         }
-        catch (OperationCanceledException) { if (!closing) SetStatus($"Search cancelled after {requestCount} request(s)."); }
-        catch (Exception e) when (e is HttpRequestException or IOException or InvalidOperationException or
+        catch (OperationCanceledException) when (operation.IsCancellationRequested) { if (!closing) SetStatus("Search cancelled."); }
+        catch (Exception e) when (e is OperationCanceledException or HttpRequestException or IOException or InvalidOperationException or
             System.ComponentModel.Win32Exception or System.Text.Json.JsonException or UnauthorizedAccessException)
         {
             if (!closing) SetStatus(mode switch
             {
-                SearchMode.Browser => "Browser-assisted search could not finish.",
-                SearchMode.Directory => "Public directory lookup could not finish.",
+                SearchMethod.Browser => "Browser-assisted search could not finish.",
+                SearchMethod.Directory => "Public directory lookup could not finish.",
                 _ => "Search could not finish. Try the station's player page."
             });
         }
         finally
         {
             scan = null;
-            browserScan = false;
+            waitForScanOnClose = false;
             operation.Dispose();
             if (!closing)
             {
@@ -563,7 +574,7 @@ internal sealed class MainForm : Form
             url.TabIndex < buttons.TabIndex && find.TabIndex < findBrowser.TabIndex && findBrowser.TabIndex < cancel.TabIndex &&
             page.TabIndex < results.TabIndex && results.TabIndex < details.TabIndex && details.TabIndex < status.TabIndex &&
             results.Parent == panel && !details.AcceptsTab && details.ReadOnly && status.ReadOnly &&
-            results.AccessibilityObject.Name == "Streams" && url.AccessibilityObject.Name == "Website address" &&
+            results.AccessibilityObject.Name == "Streams" && url.AccessibilityObject.Name == "Website address or station name" &&
             find.AccessibilityObject.KeyboardShortcut == "Ctrl+Enter" && cancel.AccessibilityObject.KeyboardShortcut == "Esc" &&
             findBrowser.AccessibilityObject.Name == "Find with browser" && findBrowser.AccessibilityObject.KeyboardShortcut == "Ctrl+Shift+Enter" &&
             IsSearchKey(Keys.Enter, true) && !IsSearchKey(Keys.Enter, false) &&

@@ -37,12 +37,15 @@ foreach (var resource in new[] { SearchSounds.SearchResource, SearchSounds.DoneR
 
 var prefsFolder = Path.Combine(directory, "prefs");
 Directory.CreateDirectory(prefsFolder);
-Check(Preferences.Load(prefsFolder) is { SearchSounds: true, CheckUpdatesAtStartup: false, PlaylistFolder: null } defaults &&
+Check(Preferences.Load(prefsFolder) is { SearchSounds: true, CheckUpdatesAtStartup: false, PlaylistFolder: null, AutomaticFallback: false } defaults &&
     defaults.ExportFolder == Preferences.DefaultPlaylistFolder, "New install defaults.");
 File.WriteAllText(Path.Combine(prefsFolder, "SearchSounds.off"), "");
 Check(!Preferences.Load(prefsFolder).SearchSounds, "Prior muted build stays muted.");
 var exportFolder = Path.Combine(directory, "my playlists");
-var settings = new Preferences(true, true, exportFolder);
+File.WriteAllText(Path.Combine(prefsFolder, "Preferences.json"), """{"SearchSounds":true,"CheckUpdatesAtStartup":true}""");
+Check(Preferences.Load(prefsFolder) is { SearchSounds: true, CheckUpdatesAtStartup: true, AutomaticFallback: false },
+    "Older preferences do not opt in to automatic fallback.");
+var settings = new Preferences(true, true, exportFolder, AutomaticFallback: true);
 settings.Save(prefsFolder);
 Check(Preferences.Load(prefsFolder) == settings && !Directory.Exists(exportFolder), "Saved preferences override the old marker without creating the export folder.");
 (settings with { SearchSounds = false }).Save(prefsFolder);

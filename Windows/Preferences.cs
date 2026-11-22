@@ -2,7 +2,8 @@ using System.Text.Json;
 
 namespace StreamSift;
 
-internal sealed record Preferences(bool SearchSounds = true, bool CheckUpdatesAtStartup = false, string? PlaylistFolder = null)
+internal sealed record Preferences(bool SearchSounds = true, bool CheckUpdatesAtStartup = false,
+    string? PlaylistFolder = null, bool AutomaticFallback = false)
 {
     internal static string UserDirectory => Path.Combine(AppContext.BaseDirectory, "User");
     internal static string DefaultPlaylistFolder => Path.Combine(UserDirectory, "Playlists");

@@ -11,22 +11,68 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
     private static readonly Uri Catalogue = new("https://de1.api.radio-browser.info/json/stations/search?hidebroken=true&order=votes&reverse=true&limit=70000");
     private static readonly Uri Mirror = new UriBuilder(Catalogue) { Host = "de2.api.radio-browser.info" }.Uri;
     private static readonly Uri ProviderPage = new("https://www.radio-browser.info/");
+    private static readonly Uri Iprd = new("https://iprd-org.github.io/iprd/site_data/metadata/catalog.json");
+    private static readonly Uri IprdPage = new("https://iprd-org.github.io/iprd/");
 
     public async Task<SearchResult> FindAsync(Uri start, CancellationToken cancel, IProgress<int>? progress = null)
     {
         if (!PublicNetwork.TryUrl(start.AbsoluteUri, null, out start)) throw new ArgumentException("Invalid public address.");
+        var startHost = HostKey(start);
+        var startPath = start.AbsolutePath.TrimEnd('/');
+        var matches = await FindLinksAsync(ProviderPage, (_, home) => HostKey(home) == startHost &&
+            (startPath.Length == 0 || home.AbsolutePath.TrimEnd('/') == startPath) ? 2 : 0, cancel);
+        return await new Discovery(client).VerifyListedAsync(start, matches.Select(match => match.Link), cancel, progress);
+    }
+
+    internal async Task<SearchResult> FindByNameAsync(string name, CancellationToken cancel)
+    {
+        string query = StationKey(name);
+        if (query.Length == 0) return new SearchResult([], 0, 0, false);
+        int Score(DirectoryEntry entry, Uri _)
+        {
+            var key = StationKey(entry.Name ?? "");
+            if (key == query) return 2;
+            return (" " + key + " ").Contains(" " + query + " ", StringComparison.Ordinal) ? 1 : 0;
+        }
+
+        var results = new List<Ranked>();
+        int failed = 0;
+        foreach (var provider in new[] { ProviderPage, IprdPage })
+        {
+            try { results.AddRange(await FindLinksAsync(provider, Score, cancel)); }
+            catch (Exception error) when (!cancel.IsCancellationRequested && error is
+                HttpRequestException or IOException or InvalidDataException or JsonException or OperationCanceledException or UnauthorizedAccessException)
+            { failed++; }
+        }
+        cancel.ThrowIfCancellationRequested();
+        if (failed == 2) throw new HttpRequestException("Both public radio directories were unavailable.");
+        var candidates = results.OrderByDescending(match => match.Score).Select(match => match.Link)
+            .DistinctBy(link => link.Url.AbsoluteUri, StringComparer.Ordinal).Take(MaxMatches);
+        var verified = await new Discovery(client).VerifyListedAsync(ProviderPage, candidates, cancel);
+        return verified with { Unreachable = verified.Unreachable + failed };
+    }
+
+    private static string StationKey(string name) =>
+        string.Join(' ', new string(name.ToLowerInvariant().Select(c => char.IsLetterOrDigit(c) ? c : ' ').ToArray())
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries));
+
+    private sealed record Ranked(Link Link, int Score);
+
+    private async Task<List<Ranked>> FindLinksAsync(Uri provider, Func<DirectoryEntry, Uri, int> score, CancellationToken cancel)
+    {
         var root = cacheDirectory ?? (OperatingSystem.IsMacOS()
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Library", "Caches", "StreamSift")
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "StreamSift", "Cache"));
-        var cache = Path.Combine(root, "radio-browser-v1.json.gz");
+        bool secondary = provider == IprdPage;
+        var cache = Path.Combine(root, secondary ? "iprd-v1.json.gz" : "radio-browser-v1.json.gz");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancel);
         deadline.CancelAfter(CacheTimeout);
         var token = deadline.Token;
         bool fresh = File.Exists(cache) && DateTime.UtcNow - File.GetLastWriteTimeUtc(cache) < CacheAge;
-        List<Link> matches = [];
+        List<Ranked> matches = [];
         if (fresh)
         {
-            try { matches = await MatchAsync(cache, start, token); }
+            try { matches = await MatchAsync(cache, provider, score, token); }
             catch (Exception error) when (error is JsonException or InvalidDataException or IOException) { fresh = false; }
         }
         if (!fresh)
@@ -35,7 +81,7 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
             var temp = Path.Combine(root, $"radio-browser-{Guid.NewGuid():N}.tmp");
             try
             {
-                using var response = await OpenCatalogueAsync(token);
+                using var response = await OpenAsync();
                 response.EnsureSuccessStatusCode();
                 await using (var source = await response.Content.ReadAsStreamAsync(token))
                 await using (var file = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, true))
@@ -45,16 +91,15 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
                     using var bounded = new BoundedInput(source);
                     writer.WriteStartArray();
                     int kept = 0;
-                    await foreach (var entry in JsonSerializer.DeserializeAsyncEnumerable(
-                        bounded, CatalogueJson.Default.DirectoryEntry, cancellationToken: token))
+                    await foreach (var entry in ReadEntriesAsync(bounded, secondary, token))
                     {
-                        if (entry == null || !PublicNetwork.TryUrl(entry.Homepage ?? "", null, out _) ||
-                            !PublicNetwork.TryUrl(entry.Url ?? "", null, out _)) continue;
+                        if (entry == null || !PublicNetwork.TryUrl(entry.Homepage ?? "", null, out var home) ||
+                            !TryStream(entry.Url, home, out var stream)) continue;
                         writer.WriteStartObject();
                         writer.WriteString("name", Extraction.StationName(entry.Name));
                         writer.WriteString("homepage", entry.Homepage);
                         writer.WriteString("url", entry.Url);
-                        if (PublicNetwork.TryUrl(entry.Resolved ?? "", null, out _) && entry.Resolved != entry.Url)
+                        if (TryStream(entry.Resolved, home, out var resolved) && resolved != stream)
                             writer.WriteString("url_resolved", entry.Resolved);
                         writer.WriteEndObject();
                         if (++kept % 128 == 0) await writer.FlushAsync(token);
@@ -63,37 +108,67 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
                     await writer.FlushAsync(token);
                 }
                 // Keep the last complete catalogue if this download is incomplete or invalid.
-                matches = await MatchAsync(temp, start, token, validateAll: true);
+                matches = await MatchAsync(temp, provider, score, token, validateAll: true);
                 File.Move(temp, cache, overwrite: true);
             }
             finally { if (File.Exists(temp)) File.Delete(temp); }
         }
-        return await new Discovery(client).VerifyListedAsync(start, matches, cancel, progress);
+        return matches;
+
+        async Task<HttpResponseMessage> OpenAsync() =>
+            secondary ? await client.GetAsync(Iprd, HttpCompletionOption.ResponseHeadersRead, token) : await OpenCatalogueAsync(token);
     }
 
-    private static async Task<List<Link>> MatchAsync(string path, Uri start, CancellationToken token, bool validateAll = false)
+    private static async IAsyncEnumerable<DirectoryEntry?> ReadEntriesAsync(Stream source, bool secondary,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken token)
+    {
+        if (!secondary)
+        {
+            await foreach (var entry in JsonSerializer.DeserializeAsyncEnumerable(source, CatalogueJson.Default.DirectoryEntry,
+                cancellationToken: token))
+                yield return entry;
+            yield break;
+        }
+        var catalog = await JsonSerializer.DeserializeAsync(source, CatalogueJson.Default.IprdCatalogue, token);
+        if (catalog?.Stations == null) throw new JsonException("The IPRD stations list is missing.");
+        foreach (var station in catalog.Stations)
+        {
+            token.ThrowIfCancellationRequested();
+            if (station?.Streams == null) continue;
+            foreach (var stream in station.Streams.Take(12))
+                yield return new DirectoryEntry(station.Name, station.Website, stream?.Url, null);
+        }
+    }
+
+    private static async Task<List<Ranked>> MatchAsync(string path, Uri provider, Func<DirectoryEntry, Uri, int> score,
+        CancellationToken token, bool validateAll = false)
     {
         await using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 65536, true);
         if (file.Length > MaxCatalogueBytes) throw new InvalidDataException("The cached directory exceeds the size limit.");
         await using var zip = new GZipStream(file, CompressionMode.Decompress);
         using var bounded = new BoundedInput(zip);
-        var matches = new List<Link>();
-        var unique = new HashSet<string>(StringComparer.Ordinal);
-        var startHost = HostKey(start);
-        var startPath = start.AbsolutePath.TrimEnd('/');
+        var exact = new Dictionary<string, Ranked>(StringComparer.Ordinal);
+        var partial = new Dictionary<string, Ranked>(StringComparer.Ordinal);
         await foreach (var entry in JsonSerializer.DeserializeAsyncEnumerable(bounded, CatalogueJson.Default.DirectoryEntry, cancellationToken: token))
         {
-            if (matches.Count == MaxMatches || entry == null ||
-                !PublicNetwork.TryUrl(entry.Homepage ?? "", null, out var home) || HostKey(home) != startHost ||
-                (startPath.Length != 0 && home.AbsolutePath.TrimEnd('/') != startPath) ||
-                !PublicNetwork.TryUrl(entry.Url ?? "", null, out var stream) || !unique.Add(stream.AbsoluteUri)) continue;
-            Uri? resolved = PublicNetwork.TryUrl(entry.Resolved ?? "", null, out var alternate) && alternate != stream ? alternate : null;
-            matches.Add(new Link(stream, ProviderPage, LinkKind.Audio, Extraction.StationName(entry.Name), true,
-                NameOrigin.Directory, resolved));
-            if (!validateAll && matches.Count == MaxMatches) break;
+            if (exact.Count == MaxMatches || entry == null ||
+                !PublicNetwork.TryUrl(entry.Homepage ?? "", null, out var home)) continue;
+            int rank = score(entry, home);
+            if (rank == 0 || !TryStream(entry.Url, home, out var stream)) continue;
+            var group = rank == 2 ? exact : partial;
+            if (group.Count == MaxMatches) continue;
+            Uri? resolved = TryStream(entry.Resolved, home, out var alternate) && alternate != stream ? alternate : null;
+            group.TryAdd(stream.AbsoluteUri, new Ranked(new Link(stream, provider, LinkKind.Audio, Extraction.StationName(entry.Name),
+                true, NameOrigin.Directory, resolved), rank));
+            if (!validateAll && exact.Count == MaxMatches) break;
         }
-        return matches;
+        return exact.Values.Concat(partial.Values).DistinctBy(match => match.Link.Url.AbsoluteUri, StringComparer.Ordinal)
+            .Take(MaxMatches).ToList();
     }
+
+    private static bool TryStream(string? raw, Uri home, out Uri stream) =>
+        PublicNetwork.TryUrl(raw ?? "", null, out stream) &&
+        (!PublicNetwork.IsDiFm(home) || PublicNetwork.IsDiFm(stream));
 
     private async Task<HttpResponseMessage> OpenCatalogueAsync(CancellationToken token)
     {
@@ -151,5 +226,13 @@ internal sealed record DirectoryEntry(
     [property: JsonPropertyName("url")] string? Url,
     [property: JsonPropertyName("url_resolved")] string? Resolved);
 
+internal sealed record IprdCatalogue([property: JsonPropertyName("stations")] IprdStation?[]? Stations);
+internal sealed record IprdStation(
+    [property: JsonPropertyName("name")] string? Name,
+    [property: JsonPropertyName("website")] string? Website,
+    [property: JsonPropertyName("streams")] IprdStream?[]? Streams);
+internal sealed record IprdStream([property: JsonPropertyName("url")] string? Url);
+
 [JsonSerializable(typeof(DirectoryEntry))]
+[JsonSerializable(typeof(IprdCatalogue))]
 internal sealed partial class CatalogueJson : JsonSerializerContext;

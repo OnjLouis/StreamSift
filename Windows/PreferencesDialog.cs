@@ -4,6 +4,7 @@ internal sealed class PreferencesDialog : Form
 {
     private readonly TabControl tabs = new() { AccessibleName = "Preference categories", Dock = DockStyle.Fill, TabIndex = 0 };
     private readonly CheckBox sounds = new() { Text = "&Search sounds", AutoSize = true };
+    private readonly CheckBox fallback = new() { Text = "&Automatically try other search methods", AutoSize = true };
     private readonly TextBox folder = new() { AccessibleName = "Playlist folder", Dock = DockStyle.Fill, MaxLength = 1024 };
     private readonly Button browse = new() { Text = "&Browse...", AutoSize = true };
     private readonly Button defaults = new() { Text = "Use &default folder", AutoSize = true };
@@ -24,24 +25,28 @@ internal sealed class PreferencesDialog : Form
         MaximizeBox = false;
         AutoScaleMode = AutoScaleMode.Font;
         sounds.Checked = current.SearchSounds;
+        fallback.Checked = current.AutomaticFallback;
         updates.Checked = current.CheckUpdatesAtStartup;
         folder.Text = current.ExportFolder;
 
-        var general = new TableLayoutPanel { RowCount = 3, ColumnCount = 3, Dock = DockStyle.Top, AutoSize = true, Padding = new(8) };
+        var general = new TableLayoutPanel { RowCount = 4, ColumnCount = 3, Dock = DockStyle.Top, AutoSize = true, Padding = new(8) };
         general.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         general.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         general.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        var label = new Label { Text = "&Playlist folder:", AutoSize = true, Anchor = AnchorStyles.Left, TabIndex = 1 };
+        var label = new Label { Text = "&Playlist folder:", AutoSize = true, Anchor = AnchorStyles.Left, TabIndex = 2 };
         sounds.TabIndex = 0;
-        folder.TabIndex = 2;
-        browse.TabIndex = 3;
-        defaults.TabIndex = 4;
+        fallback.TabIndex = 1;
+        folder.TabIndex = 3;
+        browse.TabIndex = 4;
+        defaults.TabIndex = 5;
         general.Controls.Add(sounds, 0, 0);
         general.SetColumnSpan(sounds, 3);
-        general.Controls.Add(label, 0, 1);
-        general.Controls.Add(folder, 1, 1);
-        general.Controls.Add(browse, 2, 1);
-        general.Controls.Add(defaults, 1, 2);
+        general.Controls.Add(fallback, 0, 1);
+        general.SetColumnSpan(fallback, 3);
+        general.Controls.Add(label, 0, 2);
+        general.Controls.Add(folder, 1, 2);
+        general.Controls.Add(browse, 2, 2);
+        general.Controls.Add(defaults, 1, 3);
         var generalTab = new TabPage("General");
         generalTab.Controls.Add(general);
         var updateTab = new TabPage("Updates") { Padding = new(8) };
@@ -81,7 +86,7 @@ internal sealed class PreferencesDialog : Form
         {
             var path = Preferences.NormalizeFolder(folder.Text);
             if (string.Equals(path, Preferences.DefaultPlaylistFolder, StringComparison.OrdinalIgnoreCase)) path = null;
-            Value = new Preferences(sounds.Checked, updates.Checked, path);
+            Value = new Preferences(sounds.Checked, updates.Checked, path, fallback.Checked);
             DialogResult = DialogResult.OK;
         }
         catch (Exception e) when (e is ArgumentException or NotSupportedException or IOException)
@@ -98,11 +103,12 @@ internal sealed class PreferencesDialog : Form
     {
         if (keyData != Keys.F1) return base.ProcessCmdKey(ref msg, keyData);
         string text = sounds.Focused ? "Play a sound when a search starts and another when it finishes." :
+            fallback.Focused ? "If the chosen method finds no playable stream or cannot finish, try the other methods. This can start a temporary browser and check the public directory. Escape cancels the whole search." :
             folder.Focused || browse.Focused || defaults.Focused ?
                 "Choose where Shift+Enter saves playlists. Ctrl+S starts its Save dialog in the same folder." :
             updates.Focused || tabs.SelectedIndex == 1 ?
                 "Check for a newer signed release when StreamSift opens. Updates are installed only after you choose Install update." :
-                "Set up search sounds, playlist files and update checks.";
+                "Set up search options, playlist files and update checks.";
         using var help = new TextDialog("Preferences help", text, openManual);
         help.ShowDialog(this);
         return true;
@@ -110,6 +116,8 @@ internal sealed class PreferencesDialog : Form
 
     internal bool CheckControls() => tabs.TabCount == 2 && tabs.TabPages[0].Text == "General" &&
         tabs.TabPages[1].Text == "Updates" && folder.AccessibleName == "Playlist folder" &&
-        !folder.AcceptsTab && folder.TabIndex < browse.TabIndex && browse.TabIndex < defaults.TabIndex &&
+        fallback.Text == "&Automatically try other search methods" && fallback.Checked == Value.AutomaticFallback &&
+        !folder.AcceptsTab && sounds.TabIndex < fallback.TabIndex && fallback.TabIndex < folder.TabIndex &&
+        folder.TabIndex < browse.TabIndex && browse.TabIndex < defaults.TabIndex &&
         AcceptButton is Button { Text: "&OK" } && CancelButton is Button { Text: "&Cancel" };
 }

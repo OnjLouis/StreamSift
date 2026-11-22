@@ -22,8 +22,24 @@ public static class PublicNetwork
         else if (!host.Contains('.') || host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase) ||
                  host.EndsWith(".local", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".internal", StringComparison.OrdinalIgnoreCase) ||
                  host.EndsWith(".home.arpa", StringComparison.OrdinalIgnoreCase)) return false;
+        if (IsDiFm(parsed) && IsDiFmSubscriberRoute(parsed)) return false;
         uri = new UriBuilder(parsed) { Fragment = "" }.Uri;
         return true;
+    }
+
+    internal static bool IsDiFm(Uri address)
+    {
+        var host = address.IdnHost.TrimEnd('.');
+        return host == "di.fm" || host.EndsWith(".di.fm", StringComparison.Ordinal);
+    }
+
+    private static bool IsDiFmSubscriberRoute(Uri address)
+    {
+        var label = address.IdnHost.Split('.')[0];
+        return (label.StartsWith("prem", StringComparison.Ordinal) && label.Length > 4 && label[4..].All(char.IsAsciiDigit)) ||
+            Uri.UnescapeDataString(address.AbsolutePath).StartsWith("/premium", StringComparison.OrdinalIgnoreCase) ||
+            address.Query.TrimStart('?').Split('&').Any(field =>
+                Uri.UnescapeDataString(field.Split('=', 2)[0]).Equals("listen_key", StringComparison.OrdinalIgnoreCase));
     }
 
     public static bool TryInput(string text, out Uri uri)

@@ -12,9 +12,12 @@ func selfTest() throws {
     let defaults = UserDefaults(suiteName: store)!
     defer { defaults.removePersistentDomain(forName: store) }
     var prefs = Preferences(reading: defaults)
-    try require(prefs.sounds && !prefs.startupUpdates && prefs.folder == Preferences.defaultFolder, "Initial settings")
+    try require(prefs.sounds && !prefs.startupUpdates && !prefs.automaticFallback && prefs.folder == Preferences.defaultFolder, "Initial settings")
+    defaults.set(true, forKey: "CheckUpdatesAtStartup")
+    try require(!Preferences(reading: defaults).automaticFallback, "Older settings leave fallback off")
     prefs.sounds = false
     prefs.startupUpdates = true
+    prefs.automaticFallback = true
     prefs.customFolder = root.path
     prefs.save(to: defaults)
     try require(prefs == Preferences(reading: defaults), "Settings round trip")
@@ -55,4 +58,15 @@ func selfTest() throws {
     let response = #"{"stations":[],"requests":5,"unreachable":3,"limitReached":true}"#
     let empty = try JSONDecoder().decode(SearchResult.self, from: Data(response.utf8))
     try require(empty.summary == "No live streams verified. Checked 5 addresses. 3 unavailable. Search limit reached.", "Scanner reply")
+    var output = ScannerOutput(fallback: true)
+    let prefix = output.receive(Data("--bro".utf8))
+    let progress = output.receive(Data("wser-json\r\n--directory-json\n".utf8) + Data(response.utf8))
+    try require(prefix.isEmpty && progress == [.browser, .directory] && !output.invalid && output.payload == Data(response.utf8),
+                "Read split fallback progress without losing the final scanner reply")
+    _ = output.receive(Data("\n".utf8))
+    try require(output.invalid, "Reject an unexpected third progress line")
+    let fallbackReply = #"{"stations":[],"requests":3,"unreachable":0,"limitReached":false,"method":"--directory-json","attempts":3,"failedMethods":1}"#
+    let result = try JSONDecoder().decode(SearchResult.self, from: Data(fallbackReply.utf8))
+    try require(result.method == .directory && result.summary.hasSuffix("Tried 3 methods. Methods that could not finish: 1."),
+                "Fallback results identify the method and attempt counts")
 }

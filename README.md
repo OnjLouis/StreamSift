@@ -9,9 +9,16 @@ Read the [Windows manual](Manual.html) or [Mac manual](Mac/Manual.html).
 Normal scans do not execute site JavaScript. The optional Find with Browser
 command uses an installed Chrome or Edge in a temporary session without
 sharing your browser profile or logins.
-The separate public-directory command checks verified Radio Browser matches
-by website. It caches only public directory fields and does not send the
-entered website address to the directory.
+Website scans recognise supported SecureNet and Triton player pages. The
+public-directory command matches websites against Radio Browser; station
+names and call signs are matched against Radio Browser and the
+[International Public Radio Directory](https://iprd-org.github.io/iprd/).
+StreamSift matches the downloaded catalogue data locally before verifying
+stream addresses; it does not send your search text to the directories.
+
+Optional automatic fallback runs the selected method first. When no live
+stream is verified, it tries the remaining methods in website, browser, then
+directory order. This is off by default on both platforms.
 
 ## Build and test
 

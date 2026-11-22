@@ -170,11 +170,13 @@ final class StreamTable: NSTableView {
     let window: KeyboardWindow
     private let tabs = SettingsTabs()
     private let sounds = NSButton(checkboxWithTitle: "Search sounds", target: nil, action: nil)
+    private let fallback = NSButton(checkboxWithTitle: "Automatically try other search methods", target: nil, action: nil)
     private let updates = NSButton(checkboxWithTitle: "Check for updates at startup", target: nil, action: nil)
     private let folder = NSTextField()
     private let apply: (Preferences) -> Void
     private let manual: () -> Void
     private let soundsHint = "Play a sound when a search starts and another when it finishes."
+    private let fallbackHint = "If the chosen method finds no playable stream or cannot finish, try the other methods. This can start a temporary browser and check the public directory. Escape cancels the whole search."
     private let folderHint = "Choose where Shift+Return saves playlists. Command+S starts its Save dialog in the same folder."
     private let updateHint = "Check for a newer signed release when StreamSift opens. Updates are installed only after you choose Install Update."
 
@@ -189,12 +191,14 @@ final class StreamTable: NSTableView {
         window.cancel = { [weak self] in self?.window.performClose(nil); return true }
         window.help = { [weak self] in self?.showHelp() }
         sounds.state = current.sounds ? .on : .off
+        fallback.state = current.automaticFallback ? .on : .off
         updates.state = current.startupUpdates ? .on : .off
         folder.stringValue = current.folder.path
         folder.isBezeled = true
         folder.isEditable = true
         folder.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         label("Search sounds", for: sounds, hint: soundsHint)
+        label("Automatically try other search methods", for: fallback, hint: fallbackHint)
         label("Check for updates at startup", for: updates, hint: updateHint)
         label("Playlist folder", for: folder, hint: folderHint)
         let browse = NSButton(title: "Browse...", target: self, action: #selector(browseFolder))
@@ -204,7 +208,7 @@ final class StreamTable: NSTableView {
         let folderLabel = NSTextField(labelWithString: "Playlist folder:")
         folderLabel.setAccessibilityServesAsTitleForUIElements([folder])
         let row = NSStackView(views: [folderLabel, folder, browse])
-        let general = NSStackView(views: [sounds, row, reset])
+        let general = NSStackView(views: [sounds, fallback, row, reset])
         general.orientation = .vertical
         general.alignment = .leading
         general.edgeInsets = NSEdgeInsets(top: 15, left: 15, bottom: 15, right: 15)
@@ -232,7 +236,7 @@ final class StreamTable: NSTableView {
         window.keyOrder = { [weak self, weak browse, weak reset, weak ok, weak cancel] in
             guard let self, let ok, let cancel else { return [] }
             let controls: [NSView?] = tabs.selectedTabViewItem?.identifier as? String == "Updates" ?
-                [tabs, updates, cancel, ok] : [tabs, sounds, folder, browse, reset, cancel, ok]
+                [tabs, updates, cancel, ok] : [tabs, sounds, fallback, folder, browse, reset, cancel, ok]
             return controls.compactMap { $0 }
         }
         window.initialFirstResponder = tabs
@@ -263,6 +267,7 @@ final class StreamTable: NSTableView {
         }
         var chosen = Preferences()
         chosen.sounds = sounds.state == .on
+        chosen.automaticFallback = fallback.state == .on
         chosen.startupUpdates = updates.state == .on
         chosen.customFolder = normalized
         apply(chosen)
@@ -273,7 +278,7 @@ final class StreamTable: NSTableView {
         guard window.attachedSheet == nil else { return }
         let focused = (NSApp.accessibilityFocusedUIElement as? NSView) ?? window.focusedView
         let contents = focused?.accessibilityHelp().flatMap { $0.isEmpty ? nil : $0 } ??
-            "Set up search sounds, the playlist folder and update checks."
+            "Set up search options, the playlist folder and update checks."
         HelpPanel(title: focused?.accessibilityLabel() ?? "Settings Help", text: contents, manual: manual).present(on: window)
     }
 }

@@ -17,21 +17,27 @@ struct SearchResult: Decodable {
     let requests: Int
     let unreachable: Int
     let limitReached: Bool
+    let method: SearchMode?
+    let attempts: Int?
+    let failedMethods: Int?
 
     var summary: String {
         let count = stations.count
         let caption = count == 0 ? "No live streams verified." : (count == 1 ? "1 stream found." : "\(count) streams found.")
         return caption + " Checked \(requests) \(requests == 1 ? "address" : "addresses")." +
-            (unreachable > 0 ? " \(unreachable) unavailable." : "") + (limitReached ? " Search limit reached." : "")
+            (unreachable > 0 ? " \(unreachable) unavailable." : "") + (limitReached ? " Search limit reached." : "") +
+            ((attempts ?? 0) > 1 ? " Tried \(attempts ?? 0) methods." : "") +
+            ((failedMethods ?? 0) > 0 ? " Methods that could not finish: \(failedMethods ?? 0)." : "")
     }
 }
 
 enum StreamError: LocalizedError {
-    case invalidAddress, search, browserRequired, browserSearch, directorySearch, playlist, tooManyNames
+    case invalidAddress, browserAddress, search, browserRequired, browserSearch, directorySearch, playlist, tooManyNames
 
     var errorDescription: String? {
         switch self {
-        case .invalidAddress: return "Enter a public HTTP or HTTPS address."
+        case .invalidAddress: return "Enter a public HTTP or HTTPS address, station name or call sign."
+        case .browserAddress: return "Enter a public HTTP or HTTPS address."
         case .search: return "Search could not finish. Try the station's player page."
         case .browserRequired: return "Find with Browser requires Chrome or Microsoft Edge."
         case .browserSearch: return "Browser-assisted search could not finish."
@@ -42,14 +48,14 @@ enum StreamError: LocalizedError {
     }
 }
 
-enum SearchMode: String {
+enum SearchMode: String, Decodable {
     case passive = "--json", browser = "--browser-json", directory = "--directory-json"
 
     var starting: String {
         switch self {
-        case .passive: return "Searching..."
+        case .passive: return "Finding streams..."
         case .browser: return "Searching with a temporary browser..."
-        case .directory: return "Checking the public radio directory..."
+        case .directory: return "Checking public radio directories..."
         }
     }
 
@@ -70,10 +76,37 @@ enum SearchMode: String {
     }
 }
 
+struct ScannerOutput {
+    private static let maxBytes = 8 * 1024 * 1024
+    private static let maxProgressLines = 2
+    let fallback: Bool
+    private(set) var payload = Data()
+    private(set) var invalid = false
+    private var progressCount = 0
+
+    mutating func receive(_ data: Data) -> [SearchMode] {
+        guard !invalid, data.count <= Self.maxBytes - payload.count else { invalid = true; return [] }
+        payload.append(data)
+        guard fallback else { return [] }
+        var progress: [SearchMode] = []
+        while let newline = payload.firstIndex(of: 10) {
+            let line = String(decoding: payload[..<newline], as: UTF8.self).trimmingCharacters(in: .newlines)
+            guard progressCount < Self.maxProgressLines, let next = SearchMode(rawValue: line) else {
+                invalid = true
+                break
+            }
+            progressCount += 1
+            progress.append(next)
+            payload.removeSubrange(...newline)
+        }
+        return progress
+    }
+}
+
 final class ScanJob {
     private let process = Process()
 
-    func start(_ address: String, mode: SearchMode = .passive,
+    func start(_ address: String, mode: SearchMode, fallback: Bool, onFallback: @escaping (SearchMode) -> Void,
                completed: @escaping (Result<SearchResult, Error>) -> Void) throws {
         guard !address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               address.utf16.count <= 4096, !address.contains("\0") else { throw StreamError.invalidAddress }
@@ -81,7 +114,7 @@ final class ScanJob {
         let output = Pipe()
         let input = Pipe()
         process.executableURL = scanner
-        process.arguments = [mode.rawValue]
+        process.arguments = [mode.rawValue] + (fallback ? ["--fallback"] : [])
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         process.standardInput = input
@@ -96,15 +129,23 @@ final class ScanJob {
             throw error
         }
         DispatchQueue.global(qos: .userInitiated).async { [process] in
-            let data = output.fileHandleForReading.readDataToEndOfFile()
+            var reply = ScannerOutput(fallback: fallback)
+            while true {
+                let data = output.fileHandleForReading.availableData
+                if data.isEmpty { break }
+                for next in reply.receive(data) { DispatchQueue.main.async { onFallback(next) } }
+            }
             process.waitUntilExit()
             let result = Result {
-                if process.terminationStatus == 3 { throw StreamError.invalidAddress }
+                if process.terminationStatus == 3 {
+                    if mode == .browser { throw StreamError.browserAddress }
+                    throw StreamError.invalidAddress
+                }
                 if process.terminationStatus == 4 { throw StreamError.browserRequired }
-                guard process.terminationStatus == 0, data.count <= 8 * 1024 * 1024 else {
+                guard process.terminationStatus == 0, !reply.invalid else {
                     throw mode.failure
                 }
-                return try JSONDecoder().decode(SearchResult.self, from: data)
+                return try JSONDecoder().decode(SearchResult.self, from: reply.payload)
             }
             DispatchQueue.main.async { completed(result) }
         }
@@ -152,6 +193,7 @@ enum Playlist {
 struct Preferences: Equatable {
     var sounds = true
     var startupUpdates = false
+    var automaticFallback = false
     var customFolder: String?
 
     static var defaultFolder: URL {
@@ -169,12 +211,14 @@ struct Preferences: Equatable {
     init(reading defaults: UserDefaults) {
         sounds = (defaults.object(forKey: "SearchSounds") as? Bool) ?? true
         startupUpdates = defaults.bool(forKey: "CheckUpdatesAtStartup")
+        automaticFallback = defaults.bool(forKey: "AutomaticFallback")
         customFolder = Self.validFolder(defaults.string(forKey: "PlaylistFolder") ?? "")
     }
 
     func save(to defaults: UserDefaults) {
         defaults.set(sounds, forKey: "SearchSounds")
         defaults.set(startupUpdates, forKey: "CheckUpdatesAtStartup")
+        defaults.set(automaticFallback, forKey: "AutomaticFallback")
         defaults.set(customFolder, forKey: "PlaylistFolder")
     }
 
