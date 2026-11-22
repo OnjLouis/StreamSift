@@ -426,20 +426,28 @@ const string tuneInPage = "https://tunein.com/radio/Test-FM-s12345/";
 const string tuneInApi = "https://opml.radiotime.com/Tune.ashx?id=s12345&partnerId=RadioTime&formats=mp3,aac,ogg,hls";
 handler.Text(tuneInPage, """<audio src="https://unrelated.example/page-player.mp3"></audio>""");
 handler.Text(tuneInApi, """
-    https://stream.tunein-fixture.example/live.mp3
+    https://stream.tunein-fixture.example/live.mp3?source=TuneIn&lat=51.5&long=-0.1&aw_0_1st.lon=1&session-id=abc&Listener_ID=7
     http://127.0.0.1/private.mp3
     https://promo.tunein-fixture.example/other.mp3?aw_0_1st.stationId=s999
     https://stream.tunein-fixture.example/recording.mp3?aw_0_1st.stationId=s12345
     """, "audio/x-mpegurl");
-handler.Audio("https://stream.tunein-fixture.example/live.mp3", mp3);
+const string tuneInStream = "https://stream.tunein-fixture.example/live.mp3?source=TuneIn";
+handler.Redirect(tuneInStream, "https://edge.tunein-fixture.example/live.mp3?session-id=edge");
+handler.Audio("https://edge.tunein-fixture.example/live.mp3?session-id=edge", mp3);
 handler.Audio("https://stream.tunein-fixture.example/recording.mp3?aw_0_1st.stationId=s12345", mp3, finite: true);
 int beforeTuneIn = handler.Seen.Count;
 var tuneIn = await engine.FindAsync(new Uri(tuneInPage), CancellationToken.None);
-Require(tuneIn.Stations is [{ Name: "Test FM", Format: "MP3" }] &&
-    tuneIn.Stations[0].Url.AbsoluteUri == "https://stream.tunein-fixture.example/live.mp3" &&
-    handler.Seen.Skip(beforeTuneIn).SequenceEqual([tuneInApi, "https://stream.tunein-fixture.example/live.mp3",
+Require(tuneIn.Stations is [{ Name: "Test FM", Format: "MP3" }] && tuneIn.Stations[0].Url.AbsoluteUri == tuneInStream &&
+    handler.Seen.Skip(beforeTuneIn).SequenceEqual([tuneInApi, tuneInStream, "https://edge.tunein-fixture.example/live.mp3?session-id=edge",
         "https://stream.tunein-fixture.example/recording.mp3?aw_0_1st.stationId=s12345"]),
-    "Resolve a TuneIn station page through the public Tune service, verifying only this station's live public streams.");
+    "Resolve a TuneIn station page through the public Tune service, verifying only this station's live public streams " +
+    "without location or listener details, and listing the provider address rather than a session redirect.");
+const string tuneInNamed = "https://opml.radiotime.com/Tune.ashx?id=s23456&partnerId=RadioTime&formats=mp3,aac,ogg,hls";
+handler.Text(tuneInNamed, "https://stream.tunein-fixture.example/named.mp3\n", "audio/x-mpegurl");
+handler.Audio("https://stream.tunein-fixture.example/named.mp3", mp3, "Harbour Radio");
+var tuneInRenamed = await engine.FindAsync(new Uri("https://tunein.com/radio/Wrong-Name-s23456/"), CancellationToken.None);
+Require(tuneInRenamed.Stations is [{ Name: "Harbour Radio" }],
+    "A station name reported by the verified stream is preferred over the name in the TuneIn address.");
 int beforeTuneInId = handler.Seen.Count;
 var tuneInId = await engine.FindAsync(new Uri("https://tunein.com/embed/player/s12345"), CancellationToken.None);
 Require(tuneInId.Stations is [{ Format: "MP3" }] && handler.Seen[beforeTuneInId] == tuneInApi,

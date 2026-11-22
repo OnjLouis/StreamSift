@@ -73,6 +73,19 @@ internal static partial class Extraction
         return new Link(tune, page, LinkKind.DedicatedPlayer, Label(match.Groups["name"].Value.Replace('-', ' ')));
     }
 
+    private static readonly HashSet<string> ListenerQueryKeys = new(StringComparer.OrdinalIgnoreCase)
+        { "lat", "lon", "long", "latitude", "longitude", "session-id", "sessionid", "session_id", "listenerid", "listener-id", "listener_id" };
+
+    private static Uri WithoutListenerDetails(Uri uri)
+    {
+        var kept = uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries).Where(field =>
+        {
+            var key = Uri.UnescapeDataString(field.Split('=', 2)[0]);
+            return !ListenerQueryKeys.Contains(key[(key.LastIndexOf('.') + 1)..]);
+        });
+        return new UriBuilder(uri) { Query = string.Join('&', kept) }.Uri;
+    }
+
     private static bool IsTuneInTune(Uri uri) =>
         uri.Scheme == "https" && uri.IsDefaultPort && uri.IdnHost == TuneInHost && uri.AbsolutePath == TuneInTune;
 
@@ -386,7 +399,12 @@ internal static partial class Extraction
                     field.Split('=', 2) is [var key, var value] &&
                     Uri.UnescapeDataString(key).EndsWith("stationId", StringComparison.OrdinalIgnoreCase) &&
                     !Uri.UnescapeDataString(value).Equals(station, StringComparison.OrdinalIgnoreCase))) continue;
-                Candidate(line, source.Name, true);
+                // Location and listener details are not needed to play the stream, so they are not listed or saved.
+                var stream = WithoutListenerDetails(uri);
+                // Keep the provider's address rather than a redirect target that adds its own session id.
+                // TuneIn's own listen.stream redirector is not kept because some players cannot follow it.
+                bool keep = !(HostIs(stream, "tunein.com") && stream.AbsolutePath.EndsWith("/listen.stream", StringComparison.OrdinalIgnoreCase));
+                Add(stream.AbsoluteUri, Playlist(stream) ? LinkKind.Playlist : LinkKind.Audio, source.Name, true, keepAddress: keep);
             }
 
             static string? QueryValue(Uri address, string name) => address.Query.TrimStart('?').Split('&')
