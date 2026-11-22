@@ -37,7 +37,7 @@ foreach (var resource in new[] { SearchSounds.SearchResource, SearchSounds.DoneR
 
 var prefsFolder = Path.Combine(directory, "prefs");
 Directory.CreateDirectory(prefsFolder);
-Check(Preferences.Load(prefsFolder) is { SearchSounds: true, CheckUpdatesAtStartup: false, PlaylistFolder: null,
+Check(Preferences.Load(prefsFolder) is { SearchSounds: true, CheckUpdatesAtStartup: true, PlaylistFolder: null,
         AutomaticFallback: false, MediaPlayer: PlayerChoice.Automatic } defaults &&
     defaults.ExportFolder == Preferences.DefaultPlaylistFolder, "New install defaults.");
 File.WriteAllText(Path.Combine(prefsFolder, "SearchSounds.off"), "");
@@ -47,7 +47,8 @@ File.WriteAllText(Path.Combine(prefsFolder, "Preferences.json"), """{"SearchSoun
 Check(Preferences.Load(prefsFolder) is { SearchSounds: true, CheckUpdatesAtStartup: true, AutomaticFallback: false,
         MediaPlayer: PlayerChoice.Automatic }, "Older preferences retain Automatic playback and do not opt in to automatic search fallback.");
 string prefsFile = Path.Combine(prefsFolder, "Preferences.json");
-File.WriteAllText(prefsFile, """{"SearchSounds":false,"MediaPlayer":2}""");
+File.WriteAllText(prefsFile, """{"SearchSounds":false,"CheckUpdatesAtStartup":false,"MediaPlayer":2}""");
+Check(!Preferences.Load(prefsFolder).CheckUpdatesAtStartup, "An explicit startup update opt-out stays off.");
 Preferences.Load(prefsFolder).Save(prefsFolder);
 using (var saved = JsonDocument.Parse(File.ReadAllBytes(prefsFile)))
     Check(saved.RootElement.TryGetProperty("MediaPlayer", out var selectedPlayer) && selectedPlayer.GetInt32() == 2,
@@ -55,6 +56,7 @@ using (var saved = JsonDocument.Parse(File.ReadAllBytes(prefsFile)))
 File.WriteAllText(prefsFile, """{"SearchSounds":false,"AutomaticFallback":true,"MediaPlayer":99}""");
 Check(Preferences.Load(prefsFolder) is { SearchSounds: false, AutomaticFallback: true, MediaPlayer: PlayerChoice.Automatic },
     "An unknown player choice does not reset other preferences.");
+Check(Preferences.Load(prefsFolder).CheckUpdatesAtStartup, "Use the default when there is no stored update setting.");
 var settings = new Preferences(true, true, exportFolder, AutomaticFallback: true, MediaPlayer: PlayerChoice.Vlc);
 settings.Save(prefsFolder);
 Check(Preferences.Load(prefsFolder) == settings && !Directory.Exists(exportFolder), "Saved preferences override the old marker without creating the export folder.");
@@ -125,6 +127,31 @@ Check(refreshView.RetainAvailable(counted) == refreshView &&
     refreshView.RetainAvailable([station]) == default &&
     new ResultView("AAC", ResultOrder.BitrateDescending).RetainAvailable([station]) == new ResultView(Order: ResultOrder.BitrateDescending),
     "Refresh retains available filter and sort choices, without hiding replacement formats.");
+var sessionFolder = Path.Combine(directory, "last-results");
+Check(LastResults.Load(sessionFolder) == null && !Directory.Exists(sessionFolder), "First launch does not create a results snapshot.");
+var signedStream = station with { Url = new Uri("https://radio.example/live?token=fixture") };
+var hlsStream = station with { Url = new Uri("https://radio.example/opaque-session/playlist.m3u8"), Format = "HLS", IsHls = true };
+var unsafeSource = station with { FoundOn = new Uri("https://radio.example/list?token=fixture") };
+var unsafeAddress = station with { Url = new Uri("http://127.0.0.1/stream") };
+var snapshot = LastResults.Capture("radio.example:8000", SearchMethod.Passive,
+    [signedStream, hlsStream, unsafeSource, unsafeAddress, station, quiet, quiet], refreshView, quiet.Url)!;
+Check(snapshot is not null && snapshot.Stations.SequenceEqual([station, quiet]), "Keep reusable streams only; filter temporary and local URLs.");
+snapshot!.Save(sessionFolder);
+Check(LastResults.Load(sessionFolder) is { } restored && restored.Input == "radio.example:8000" &&
+    restored.Method == SearchMethod.Passive && restored.View == refreshView &&
+    restored.Selection == quiet.Url && restored.View.Apply(restored.Stations).SequenceEqual([quiet]),
+    "Reopen the stored query, method, order, format and selected row.");
+Check(LastResults.Capture("https://radio.example/?token=fixture", SearchMethod.Passive, [station], default, null) == null &&
+    LastResults.Capture("radio.example", SearchMethod.Passive, [], default, null) == null &&
+    LastResults.Capture("radio.example", SearchMethod.Passive, [hlsStream], default, null) == null &&
+    LastResults.Load(sessionFolder) != null, "Unsafe and empty scans cannot replace the saved results.");
+var sessionPath = Path.Combine(sessionFolder, "LastResults.json");
+Check(!File.ReadAllText(sessionPath).Contains("token=fixture") && !File.ReadAllText(sessionPath).Contains("opaque-session"),
+    "Sensitive addresses are absent from stored bytes.");
+LastResults.Clear(sessionFolder);
+Check(LastResults.Load(sessionFolder) == null && !Directory.EnumerateFiles(sessionFolder).Any(), "New Search forgets saved results.");
+File.WriteAllText(sessionPath, "{broken");
+Check(LastResults.Load(sessionFolder) == null, "Malformed state does not prevent a clean launch.");
 var playlist = PlaylistFile.SaveNew(exportFolder, [station]);
 var secondPlaylist = PlaylistFile.SaveNew(exportFolder, [station]);
 var expectedPlaylist = "#EXTM3U\r\n#EXTINF:-1,Lyd \u00e9 FM\r\nhttps://radio.example/stream\r\n";

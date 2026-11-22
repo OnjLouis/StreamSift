@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace StreamSift;
 
-internal enum StreamAction { Copy = 1, Save, Foobar, OpenDefault, Preview, SelectAll, OpenBrowser }
+internal enum StreamAction { Copy = 1, Save, Foobar, OpenDefault, Preview, SelectAll, OpenBrowser, Review }
 
 internal sealed class StreamList : ListView
 {
@@ -10,6 +10,7 @@ internal sealed class StreamList : ListView
     internal const string BrowserLabel = "Open stream in browser";
     private bool selectingAll;
     internal event Action<StreamAction>? Command;
+    internal string? CurrentLine => (FocusedItem ?? (SelectedItems.Count > 0 ? SelectedItems[0] : null))?.Text;
 
     internal static bool OpensMenu(Keys key) => key is Keys.Apps or (Keys.Shift | Keys.F10);
     internal static bool PreviewsStream(Keys key) => key == Keys.Enter;
@@ -20,6 +21,11 @@ internal sealed class StreamList : ListView
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        if (keyData == Keys.F4 && CurrentLine != null)
+        {
+            Command?.Invoke(StreamAction.Review);
+            return true;
+        }
         if (SelectsAll(keyData) && Items.Count > 0)
         {
             Command?.Invoke(StreamAction.SelectAll);
@@ -100,17 +106,20 @@ internal sealed class StreamList : ListView
         bool single = SelectedItems.Count == 1;
         var row = (FocusedItem is { Selected: true } focused ? focused : SelectedItems[0]).Bounds;
         var position = screen ?? PointToScreen(new Point(row.Left + 10, row.Bottom));
-        var picked = (StreamAction)NativeRowMenu.Show(owner, position,
-        [
-            ((int)StreamAction.Preview, PlayLabel + "\tEnter", single),
-            ((int)StreamAction.OpenBrowser, BrowserLabel + "\tAlt+Enter", single),
-            ((int)StreamAction.Copy, (single ? "Copy stream address" : "Copy stream addresses") + "\tCtrl+C", true),
-            ((int)StreamAction.Save, "Save playlist...\tCtrl+S", true),
-            ((int)StreamAction.Foobar, "Add to Foobar2000\tCtrl+Shift+F", true),
-            ((int)StreamAction.OpenDefault, "Save and open in default player\tShift+Enter", true)
-        ]);
+        var picked = (StreamAction)NativeRowMenu.Show(owner, position, MenuItems(single));
         if (picked != 0) Command?.Invoke(picked);
     }
+
+    internal static (int Id, string Caption, bool Enabled)[] MenuItems(bool single) =>
+    [
+        ((int)StreamAction.Preview, "&" + PlayLabel + "\tEnter", single),
+        ((int)StreamAction.OpenBrowser, "&" + BrowserLabel + "\tAlt+Enter", single),
+        ((int)StreamAction.Copy, (single ? "&Copy stream address" : "&Copy stream addresses") + "\tCtrl+C", true),
+        ((int)StreamAction.Review, "Re&view text...\tF4", true),
+        ((int)StreamAction.Save, "&Save playlist...\tCtrl+S", true),
+        ((int)StreamAction.Foobar, "&Add to Foobar2000\tCtrl+Shift+F", true),
+        ((int)StreamAction.OpenDefault, "Save and open in &default player\tShift+Enter", true)
+    ];
 }
 
 internal static class NativeRowMenu

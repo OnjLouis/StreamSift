@@ -42,7 +42,7 @@ enum StreamPreview {
     }
 }
 
-struct Station: Decodable, Equatable {
+struct Station: Codable, Equatable {
     let name: String
     let url: String
     let format: String
@@ -93,7 +93,7 @@ enum StreamError: LocalizedError {
     }
 }
 
-enum SearchMode: String, Decodable {
+enum SearchMode: String, Codable {
     case passive = "--json", browser = "--browser-json", directory = "--directory-json"
 
     var starting: String {
@@ -246,7 +246,7 @@ enum Playlist {
 
 struct Preferences: Equatable {
     var sounds = true
-    var startupUpdates = false
+    var startupUpdates = true
     var automaticFallback = false
     var mediaPlayer = MediaPlayerChoice.automatic
     var customFolder: String?
@@ -265,7 +265,7 @@ struct Preferences: Equatable {
 
     init(reading defaults: UserDefaults) {
         sounds = (defaults.object(forKey: "SearchSounds") as? Bool) ?? true
-        startupUpdates = defaults.bool(forKey: "CheckUpdatesAtStartup")
+        startupUpdates = (defaults.object(forKey: "CheckUpdatesAtStartup") as? Bool) ?? true
         automaticFallback = defaults.bool(forKey: "AutomaticFallback")
         mediaPlayer = MediaPlayerChoice(rawValue: defaults.string(forKey: "MediaPlayer") ?? "") ?? .automatic
         customFolder = Self.validFolder(defaults.string(forKey: "PlaylistFolder") ?? "")

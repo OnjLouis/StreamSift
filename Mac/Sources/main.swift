@@ -19,6 +19,7 @@ import UniformTypeIdentifiers
     private lazy var history = SearchHistory(reading: defaults)
     private var historyOpen = false
     private var settings: PreferencesWindow?
+    private weak var reviewPanel: HelpPanel?
     private var preferences = Preferences()
     private var startSound: NSSound?
     private var doneSound: NSSound?
@@ -40,14 +41,18 @@ import UniformTypeIdentifiers
         doneSound = sound(named: "done")
         buildMenus()
         buildWindow()
+        let restored = restoreLastResults()
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(address)
+        window.makeFirstResponder(restored ? table : address)
         if preferences.startupUpdates { checkForUpdates(automatic: true) }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
-    func applicationWillTerminate(_ notification: Notification) { job?.cancel() }
+    func applicationWillTerminate(_ notification: Notification) {
+        rememberLastResults()
+        job?.cancel()
+    }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         window.makeKeyAndOrderFront(nil)
         return true
@@ -102,7 +107,7 @@ import UniformTypeIdentifiers
         let searchButtons = NSStackView(views: [find, findBrowser, cancel])
         searchButtons.alignment = .centerY
 
-        label("Streams", for: table, hint: "Command+A selects all visible streams, and Command+S saves the selection in one playlist. Return plays one selected stream. Command+3 moves to Stream Details.")
+        label("Streams", for: table, hint: "Command+A selects all visible streams, and Command+S saves the selection in one playlist. Return plays one selected stream. F4 reviews the current line. Command+3 moves to Stream Details.")
         table.usesAlternatingRowBackgroundColors = true
         table.allowsMultipleSelection = true
         table.allowsEmptySelection = false
@@ -119,6 +124,7 @@ import UniformTypeIdentifiers
         table.openPlayer = { [weak self] in self?.openDefaultPlayer() }
         table.previewStream = { [weak self] in self?.previewStream() }
         table.openBrowser = { [weak self] in self?.openStreamInBrowser() }
+        table.reviewLine = { [weak self] in self?.reviewStreamLine() }
         table.didSelectAll = { [weak self] in
             guard let self else { return }
             let count = table.selectedRowIndexes.count
@@ -129,7 +135,7 @@ import UniformTypeIdentifiers
         table.delegate = self
         details.configure()
         label("Stream details", for: details,
-              hint: "Return searches a selected address. Option+Return opens it in your browser. Command+C copies the row. The context menu can scan the stream server.")
+              hint: "F4 reviews the current line. Return searches the source or opens Save Stream Playlist on an HLS address. On Stream address, Shift+Return scans the server.")
         details.onCommand = { [weak self] command, row in self?.runDetailAction(command, row: row) }
         details.actionMenu = { [weak self] in self?.detailMenu() }
         let listView = scroll(table)
@@ -208,7 +214,8 @@ import UniformTypeIdentifiers
             item("Save and Open in Default Player", #selector(openDefaultPlayer)), .separator(),
             item("Go to Address", #selector(focusAddress), "1"),
             item("Go to Streams", #selector(focusStreams), "2"),
-            item("Go to Stream Details", #selector(focusDetails), "3"), .separator(),
+            item("Go to Stream Details", #selector(focusDetails), "3"),
+            item("Go to Status", #selector(focusStatus), "4"), .separator(),
             item("Filter and Sort...", #selector(showResultFilter), "l"),
             item("Find in Results...", #selector(showResultFind), "f"),
             item("Find Next", #selector(findNextResult), "g"),
@@ -238,6 +245,7 @@ import UniformTypeIdentifiers
     @objc private func focusAddress() { if job == nil { window.makeFirstResponder(address) } }
     @objc private func focusStreams() { if !stations.isEmpty { window.makeFirstResponder(table) } }
     @objc private func focusDetails() { if selected != nil { window.makeFirstResponder(details) } }
+    @objc private func focusStatus() { window.makeFirstResponder(status) }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
@@ -248,14 +256,18 @@ import UniformTypeIdentifiers
                 window.isKeyWindow && window.attachedSheet == nil
         case #selector(previewStream), #selector(openStreamInBrowser):
             return table.selectedRowIndexes.count == 1 && window.isKeyWindow && window.attachedSheet == nil
-        case #selector(searchDetail):
-            return details.canSearch && details.selectedDetail?.address != nil && window.attachedSheet == nil
+        case #selector(activateDetail):
+            return details.canSearch && details.selectedDetail?.enterCommand != nil && window.attachedSheet == nil
         case #selector(scanDetailServer):
             return details.canSearch && details.selectedDetail?.server != nil && window.attachedSheet == nil
-        case #selector(openDetail), #selector(copyDetail):
+        case #selector(reviewStreamLine):
+            return stations.indices.contains(table.selectedRow) && window.attachedSheet == nil
+        case #selector(openDetail), #selector(copyDetail), #selector(reviewDetailLine):
             return details.selectedDetail != nil && window.attachedSheet == nil
         case #selector(focusAddress):
             return job == nil && window.isKeyWindow && window.attachedSheet == nil
+        case #selector(focusStatus):
+            return window.isKeyWindow && window.attachedSheet == nil
         case #selector(focusStreams):
             return !stations.isEmpty && window.isKeyWindow && window.attachedSheet == nil
         case #selector(showResultFilter):
@@ -289,9 +301,13 @@ import UniformTypeIdentifiers
 
     func numberOfRows(in tableView: NSTableView) -> Int { stations.count }
 
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+    private func streamLine(at row: Int) -> String? {
         guard stations.indices.contains(row) else { return nil }
-        let text = stations[row].listLabel(named: names[row])
+        return stations[row].listLabel(named: names[row])
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard let text = streamLine(at: row) else { return nil }
         let cell = NSTextField(labelWithString: text)
         cell.lineBreakMode = .byTruncatingMiddle
         cell.toolTip = text
@@ -319,6 +335,25 @@ import UniformTypeIdentifiers
     private var mainKeyOrder: [NSView] {
         (job == nil ? [address, find, findBrowser] as [NSView] : [cancel]) + (stations.isEmpty ? [] : [table]) +
             (selected == nil ? [] : [details]) + [status]
+    }
+
+    private func restoreLastResults() -> Bool {
+        guard let saved = LastResults.read(from: defaults) else { return false }
+        lastSearch = (saved.input, saved.mode)
+        address.stringValue = saved.input
+        allStations = saved.stations
+        resultView = saved.view
+        render(resultView.apply(allStations), preserving: Set(saved.selection.map { [$0] } ?? []))
+        setStatus("Restored \(stations.count) \(stations.count == 1 ? "stream" : "streams") from a saved search. Press Command+R to refresh.")
+        return true
+    }
+
+    private func rememberLastResults() {
+        guard !allStations.isEmpty, let lastSearch else { return }
+        let row = table.selectedRow
+        LastResults.capture(input: lastSearch.input, mode: lastSearch.mode, stations: allStations,
+                            view: resultView, selection: stations.indices.contains(row) ? stations[row].url : nil)?
+            .save(to: defaults)
     }
 
     private func load(_ found: [Station]) {
@@ -432,6 +467,7 @@ import UniformTypeIdentifiers
         let refreshing = refreshInput != nil
         let input = refreshInput ?? newInput ?? address.currentEditor()?.string ?? address.stringValue
         let running = ScanJob()
+        rememberLastResults()
         do {
             try running.start(input, mode: mode, fallback: preferences.automaticFallback, onFallback: { [weak self, weak running] next in
                 guard let self, job === running, !isCancelling else { return }
@@ -477,6 +513,7 @@ import UniformTypeIdentifiers
                 } else {
                     load(found.stations)
                 }
+                rememberLastResults()
                 let prefix = found.stations.isEmpty && (found.attempts ?? 0) > 1 ? "Automatic search: " : (found.method ?? mode).resultPrefix
                 message = (refreshing ? "Refresh finished. " : "") + prefix + found.summary
                 if refreshing, let format = resultView.format {
@@ -513,6 +550,7 @@ import UniformTypeIdentifiers
 
     @objc private func reset() {
         guard job == nil else { return }
+        LastResults.clear(in: defaults)
         lastSearch = nil
         if address.indexOfSelectedItem >= 0 { address.deselectItem(at: address.indexOfSelectedItem) }
         address.stringValue = ""
@@ -526,6 +564,7 @@ import UniformTypeIdentifiers
         menu.addItem(item("Play Stream", #selector(previewStream), "\r", modifiers: []))
         menu.addItem(item("Open Stream in Browser", #selector(openStreamInBrowser), "\r", modifiers: .option))
         menu.addItem(item(table.selectedRowIndexes.count == 1 ? "Copy Stream Address" : "Copy Stream Addresses", #selector(copyAddress), "c"))
+        menu.addItem(item("Review Text...", #selector(reviewStreamLine), functionFour, modifiers: []))
         menu.addItem(item("Save Playlist...", #selector(savePlaylist), "s"))
         menu.addItem(item("Save and Open in Default Player", #selector(openDefaultPlayer), "\r", modifiers: .shift))
         return menu
@@ -534,17 +573,28 @@ import UniformTypeIdentifiers
     private func detailMenu() -> NSMenu? {
         guard let row = details.selectedDetail else { return nil }
         let menu = NSMenu()
+        if let command = row.enterCommand {
+            let title: String
+            switch command {
+            case .savePlaylist: title = "Save Playlist..."
+            case .scanServer: title = "Scan Stream Server"
+            default: title = "Search This Address"
+            }
+            menu.addItem(item(title, #selector(activateDetail), "\r", modifiers: []))
+        }
         if row.address != nil {
-            menu.addItem(item("Search This Address", #selector(searchDetail), "\r", modifiers: []))
             menu.addItem(item("Open in Browser", #selector(openDetail), "\r", modifiers: .option))
         }
         menu.addItem(item(row.address == nil ? "Copy Value" : "Copy Address", #selector(copyDetail), "c"))
-        if row.server != nil { menu.addItem(item("Scan Stream Server", #selector(scanDetailServer))) }
+        menu.addItem(item("Review Text...", #selector(reviewDetailLine), functionFour, modifiers: []))
+        if row.kind == .streamAddress, row.server != nil {
+            menu.addItem(item("Scan Stream Server", #selector(scanDetailServer), "\r", modifiers: .shift))
+        }
         return menu
     }
 
-    @objc private func searchDetail() {
-        if let row = details.selectedDetail { runDetailAction(.search, row: row) }
+    @objc private func activateDetail() {
+        if let row = details.selectedDetail, let command = row.enterCommand { runDetailAction(command, row: row) }
     }
 
     @objc private func openDetail() {
@@ -555,20 +605,40 @@ import UniformTypeIdentifiers
         if let row = details.selectedDetail { runDetailAction(.copy, row: row) }
     }
 
+    @objc private func reviewStreamLine() {
+        if let text = streamLine(at: table.selectedRow) { reviewLine(text) }
+    }
+
+    @objc private func reviewDetailLine() {
+        if let row = details.selectedDetail { runDetailAction(.review, row: row) }
+    }
+
+    private func reviewLine(_ text: String) {
+        guard window.attachedSheet == nil else { return }
+        let review = HelpPanel(title: "Review Text", text: text, bodyLabel: "Text")
+        review.enableReviewHelp { [weak self] in self?.openManual() }
+        reviewPanel = review
+        review.present(on: window)
+    }
+
     @objc private func scanDetailServer() {
-        if details.canSearch, let server = details.selectedDetail?.server {
-            startSearch(mode: .passive, newInput: server.absoluteString)
-        }
+        if let row = details.selectedDetail { runDetailAction(.scanServer, row: row) }
     }
 
     private func runDetailAction(_ command: DetailTable.Command, row: DetailRow) {
         switch command {
         case .search:
             if details.canSearch, let target = row.address { startSearch(mode: .passive, newInput: target.absoluteString) }
+        case .scanServer:
+            if details.canSearch, let server = row.server { startSearch(mode: .passive, newInput: server.absoluteString) }
+        case .savePlaylist:
+            if details.canSearch, let station = row.playlistStation { exportPlaylist([station]) }
         case .openBrowser:
             if let target = row.address { openAddressInBrowser(target) }
         case .copy:
             copyText(row.value, confirmation: row.label + " copied.")
+        case .review:
+            reviewLine(row.text)
         }
     }
 
@@ -586,7 +656,10 @@ import UniformTypeIdentifiers
     }
 
     @objc private func savePlaylist() {
-        let selection = selectedStations
+        exportPlaylist(selectedStations)
+    }
+
+    private func exportPlaylist(_ selection: [Station]) {
         guard !selection.isEmpty, window.attachedSheet == nil else { return }
         do { try FileManager.default.createDirectory(at: preferences.folder, withIntermediateDirectories: true) }
         catch { showMessage("Could Not Open Playlist Folder", error.localizedDescription); return }
@@ -715,11 +788,19 @@ import UniformTypeIdentifiers
 
     @objc private func focusedHelp() {
         if settings?.window.isKeyWindow == true { settings?.showHelp(); return }
-        guard window.attachedSheet == nil else { return }
+        guard window.attachedSheet == nil else { reviewPanel?.showReviewHelp(); return }
         let focus = window.focusedView
-        let text = focus?.accessibilityHelp().flatMap { $0.isEmpty ? nil : $0 } ??
-            "Enter a website address and press Return. When streams are found, use the results table to copy or save a stream."
-        HelpPanel(title: focus?.accessibilityLabel() ?? "StreamSift Help", text: text, manual: { [weak self] in self?.openManual() })
+        let help: (String, String)
+        if focus === details, let row = details.selectedDetail {
+            help = (row.label + " Help", ContextGuide.detail(row, canSearch: details.canSearch))
+        } else if focus === table {
+            help = ("Streams Help", ContextGuide.streams(selected: table.selectedRowIndexes.count))
+        } else {
+            let text = focus?.accessibilityHelp().flatMap { $0.isEmpty ? nil : $0 } ??
+                "Enter a website address and press Return. When streams are found, use the results table to copy or save a stream."
+            help = (focus?.accessibilityLabel() ?? "StreamSift Help", text)
+        }
+        HelpPanel(title: help.0, text: help.1, manual: { [weak self] in self?.openManual() })
             .present(on: window)
     }
 

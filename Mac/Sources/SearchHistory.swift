@@ -31,7 +31,7 @@ struct SearchHistory {
         entries.removeAll()
     }
 
-    private static func key(_ value: String) -> String? {
+    static func key(_ value: String) -> String? {
         guard !value.isEmpty, value.utf16.count <= 1024,
               !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
               !value.contains(where: { "?#@\\".contains($0) }) else { return nil }

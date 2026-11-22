@@ -2,6 +2,7 @@ import AppKit
 import Carbon.HIToolbox
 
 let functionOne = String(UnicodeScalar(NSF1FunctionKey)!)
+let functionFour = String(UnicodeScalar(NSF4FunctionKey)!)
 
 func label(_ title: String, for view: NSView, hint: String) {
     view.setAccessibilityLabel(title)
@@ -90,6 +91,7 @@ final class StreamTable: NSTableView {
     var openPlayer: (() -> Void)?
     var previewStream: (() -> Void)?
     var openBrowser: (() -> Void)?
+    var reviewLine: (() -> Void)?
     var actionMenu: (() -> NSMenu?)?
     var didSelectAll: (() -> Void)?
     var hasStreams = false
@@ -105,6 +107,10 @@ final class StreamTable: NSTableView {
 
     override func keyDown(with event: NSEvent) {
         let flags = event.modifierFlags.intersection([.control, .option, .shift, .command])
+        if flags.isEmpty, event.keyCode == kVK_F4, selectedRow >= 0 {
+            reviewLine?()
+            return
+        }
         if selectedRow >= 0 && (event.keyCode == kVK_Return || event.keyCode == kVK_ANSI_KeypadEnter) {
             if flags == .shift { openPlayer?(); return }
             if flags == .option { openBrowser?(); return }
@@ -133,13 +139,14 @@ final class StreamTable: NSTableView {
 @MainActor final class HelpPanel: NSObject {
     private let panel: KeyboardWindow
     private let body: NSTextView
-    private let manual: () -> Void
+    private let manual: (() -> Void)?
+    private var reviewHelpManual: (() -> Void)?
 
-    init(title: String, text: String, manual: @escaping () -> Void) {
+    init(title: String, text: String, bodyLabel: String = "Help text", manual: (() -> Void)? = nil) {
         self.manual = manual
         panel = KeyboardWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 205),
                                styleMask: [.titled, .resizable], backing: .buffered, defer: false)
-        body = readOnlyText("Help text", hint: "")
+        body = readOnlyText(bodyLabel, hint: "")
         super.init()
         panel.title = title
         body.string = text
@@ -147,7 +154,7 @@ final class StreamTable: NSTableView {
         let close = NSButton(title: "Close", target: self, action: #selector(closePanel))
         panel.cancel = { [weak self] in self?.closePanel(); return true }
         let box = scroll(body)
-        let buttons = NSStackView(views: [open, close])
+        let buttons = NSStackView(views: manual == nil ? [close] : [open, close])
         let content = NSStackView(views: [box, buttons])
         content.orientation = .vertical
         content.alignment = .trailing
@@ -155,20 +162,37 @@ final class StreamTable: NSTableView {
         panel.contentView = content
         box.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -28).isActive = true
         box.setContentHuggingPriority(.defaultLow, for: .vertical)
-        body.nextKeyView = open
+        body.nextKeyView = manual == nil ? close : open
         open.nextKeyView = close
         close.nextKeyView = body
-        panel.keyOrder = { [weak body, weak open, weak close] in [body, open, close].compactMap { $0 } }
+        let order = manual == nil ? [body, close] as [NSView] : [body, open, close]
+        panel.keyOrder = { order }
     }
 
-    func present(on parent: NSWindow) {
-        let old = parent.firstResponder
-        parent.beginSheet(panel) { [self] response in
-            if let old { parent.makeFirstResponder(old) }
-            if response == .OK { manual() }
+    func present(on parent: NSWindow, over review: NSWindow? = nil) {
+        let focusOwner = review ?? parent
+        let old = focusOwner.firstResponder
+        let completion: (NSApplication.ModalResponse) -> Void = { [self] response in
+            if let old { focusOwner.makeFirstResponder(old) }
+            if response == .OK { manual?() }
         }
+        if review != nil { parent.beginCriticalSheet(panel, completionHandler: completion) }
+        else { parent.beginSheet(panel, completionHandler: completion) }
         panel.makeFirstResponder(body)
         body.setSelectedRange(NSRange(location: 0, length: 0))
+    }
+
+    func enableReviewHelp(manual: @escaping () -> Void) {
+        reviewHelpManual = manual
+        panel.help = { [weak self] in self?.showReviewHelp() }
+    }
+
+    func showReviewHelp() {
+        guard panel.isKeyWindow, let parent = panel.sheetParent, let manual = reviewHelpManual else { return }
+        let reading = panel.firstResponder === body
+        HelpPanel(title: reading ? "Review Text Help" : "Close Help",
+                  text: reading ? ContextGuide.reviewText : ContextGuide.reviewClose, manual: manual)
+            .present(on: parent, over: panel)
     }
 
     @objc private func closePanel() { panel.sheetParent?.endSheet(panel, returnCode: .cancel) }

@@ -1,21 +1,28 @@
 namespace StreamSift;
 
 internal enum DetailKind { StreamAddress, FoundOn, Station, Format, Bitrate, Listeners, Selection }
-internal enum DetailAction { Search = 1, OpenBrowser, Copy, ScanServer }
+internal enum DetailAction { Search = 1, OpenBrowser, Copy, ScanServer, SavePlaylist, Review }
 
-internal sealed record DetailRow(DetailKind Kind, string Label, string Value, Uri? Address = null)
+internal sealed record DetailRow(DetailKind Kind, string Label, string Value, Uri? Address = null,
+    Station? PlaylistStation = null, bool FoundOnIsStream = false)
 {
     internal string Text => Label + ": " + Value;
-    internal Uri? Server => Kind == DetailKind.StreamAddress && Address is Uri address
-        ? new Uri(address.GetLeftPart(UriPartial.Authority) + "/") : null;
+    internal Uri? Server => (Kind == DetailKind.StreamAddress || FoundOnIsStream) && Address is Uri address
+        ? new Uri(address.GetComponents(UriComponents.SchemeAndServer, UriFormat.UriEscaped) + "/") : null;
+    internal DetailAction? EnterAction => Address == null ? null :
+        PlaylistStation != null ? DetailAction.SavePlaylist :
+        !FoundOnIsStream ? DetailAction.Search :
+        Server?.AbsoluteUri != Address.AbsoluteUri ? DetailAction.ScanServer : null;
 
     internal static DetailRow[] Rows(Station? station, int selectedCount)
     {
         if (station == null) return [];
         var rows = new List<DetailRow>
         {
-            new(DetailKind.StreamAddress, "Stream address", station.Url.AbsoluteUri, station.Url),
-            new(DetailKind.FoundOn, "Found on", station.FoundOn.AbsoluteUri, station.FoundOn),
+            new(DetailKind.StreamAddress, "Stream address", station.Url.AbsoluteUri, station.Url,
+                PlaylistStation: station.IsHls ? station : null),
+            new(DetailKind.FoundOn, "Found on", station.FoundOn.AbsoluteUri, station.FoundOn,
+                FoundOnIsStream: station.FoundOn.AbsoluteUri == station.Url.AbsoluteUri),
             new(DetailKind.Station, "Station", station.Name),
             new(DetailKind.Format, "Format", station.Format),
             new(DetailKind.Bitrate, "Bitrate", station.Bitrate is int rate ? $"{rate} kbps" : "not reported")
@@ -71,9 +78,11 @@ internal sealed class DetailList : ListView
 
     internal static DetailAction? ActionFor(Keys key, DetailRow row, bool canSearch) => key switch
     {
-        Keys.Enter when row.Address != null && canSearch => DetailAction.Search,
+        Keys.Enter when canSearch => row.EnterAction,
+        Keys.Shift | Keys.Enter when canSearch && row.Kind == DetailKind.StreamAddress && row.Server != null => DetailAction.ScanServer,
         Keys.Alt | Keys.Enter when row.Address != null => DetailAction.OpenBrowser,
         Keys.Control | Keys.C => DetailAction.Copy,
+        Keys.F4 => DetailAction.Review,
         _ => null
     };
 
@@ -86,13 +95,13 @@ internal sealed class DetailList : ListView
             Command?.Invoke(action, row);
             return true;
         }
-        return keyData == Keys.Enter || base.ProcessCmdKey(ref msg, keyData);
+        return keyData is Keys.Enter or (Keys.Shift | Keys.Enter) || base.ProcessCmdKey(ref msg, keyData);
     }
 
     protected override void OnItemActivate(EventArgs e)
     {
         base.OnItemActivate(e);
-        if (CanSearch && SelectedDetail is { Address: not null } row) Command?.Invoke(DetailAction.Search, row);
+        if (CanSearch && SelectedDetail is { EnterAction: { } action } row) Command?.Invoke(action, row);
     }
 
     protected override void WndProc(ref Message m)
@@ -114,19 +123,34 @@ internal sealed class DetailList : ListView
         item.EnsureVisible();
     }
 
+    internal static List<(int Id, string Caption, bool Enabled)> MenuItems(DetailRow row, bool canSearch)
+    {
+        var commands = new List<(int Id, string Caption, bool Enabled)>();
+        const string scan = "Scan strea&m server";
+        if (row.EnterAction is { } action)
+        {
+            var label = action switch
+            {
+                DetailAction.SavePlaylist => "&Save playlist...",
+                DetailAction.ScanServer => scan,
+                _ => "&Search this address"
+            };
+            commands.Add(((int)action, label + "\tEnter", canSearch));
+        }
+        if (row.Address != null) commands.Add(((int)DetailAction.OpenBrowser, "&Open in browser\tAlt+Enter", true));
+        commands.Add(((int)DetailAction.Copy, (row.Address == null ? "&Copy value" : "&Copy address") + "\tCtrl+C", true));
+        commands.Add(((int)DetailAction.Review, "Re&view text...\tF4", true));
+        if (row.Kind == DetailKind.StreamAddress && row.Server != null)
+            commands.Add(((int)DetailAction.ScanServer, scan + "\tShift+Enter", canSearch));
+        return commands;
+    }
+
     private void OpenMenu(Point? screen)
     {
         if (SelectedDetail is not DetailRow row || FindForm() is not Form owner) return;
-        var commands = new List<(int, string, bool)>();
-        if (row.Address != null)
-        {
-            commands.Add(((int)DetailAction.Search, "Search this address\tEnter", CanSearch));
-            commands.Add(((int)DetailAction.OpenBrowser, "Open in browser\tAlt+Enter", true));
-        }
-        commands.Add(((int)DetailAction.Copy, (row.Address == null ? "Copy value" : "Copy address") + "\tCtrl+C", true));
-        if (row.Server != null) commands.Add(((int)DetailAction.ScanServer, "Scan stream server", CanSearch));
         var bounds = SelectedItems[0].Bounds;
-        var picked = NativeRowMenu.Show(owner, screen ?? PointToScreen(new Point(bounds.Left + 10, bounds.Bottom)), commands);
+        var picked = NativeRowMenu.Show(owner, screen ?? PointToScreen(new Point(bounds.Left + 10, bounds.Bottom)),
+            MenuItems(row, CanSearch));
         if (picked != 0) Command?.Invoke((DetailAction)picked, row);
     }
 }

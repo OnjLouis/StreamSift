@@ -33,8 +33,14 @@ internal static class MenuCommand
 
 internal sealed class TextDialog : Form
 {
-    internal TextDialog(string title, string message, Action? openManual = null, string? primaryAction = null)
+    private readonly TextBox body;
+    private readonly Button close;
+    private readonly Action? reviewHelpManual;
+
+    internal TextDialog(string title, string message, Action? openManual = null, string? primaryAction = null,
+        bool wordWrap = true, Action? reviewHelpManual = null)
     {
+        this.reviewHelpManual = reviewHelpManual;
         Text = title;
         ClientSize = new(510, 205);
         MinimumSize = new(410, 205);
@@ -42,12 +48,13 @@ internal sealed class TextDialog : Form
         ShowInTaskbar = false;
         MinimizeBox = false;
         MaximizeBox = false;
-        var body = new TextBox
+        body = new TextBox
         {
             AccessibleName = "Text", Text = message, ReadOnly = true,
-            Multiline = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, TabIndex = 0
+            Multiline = true, WordWrap = wordWrap, ScrollBars = wordWrap ? ScrollBars.Vertical : ScrollBars.Both,
+            Dock = DockStyle.Fill, TabIndex = 0
         };
-        var close = new Button { Text = "&Close", AutoSize = true, DialogResult = DialogResult.Cancel };
+        close = new Button { Text = "&Close", AutoSize = true, DialogResult = DialogResult.Cancel };
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, TabIndex = 1 };
         if (primaryAction != null)
             buttons.Controls.Add(new Button { Text = primaryAction, AutoSize = true, DialogResult = DialogResult.OK, TabIndex = 0 });
@@ -67,5 +74,16 @@ internal sealed class TextDialog : Form
         Controls.Add(grid);
         CancelButton = close;
         Shown += (_, _) => { body.Select(0, 0); body.Focus(); };
+    }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (keyData != Keys.F1 || reviewHelpManual == null) return base.ProcessCmdKey(ref msg, keyData);
+        bool onClose = close.ContainsFocus;
+        using var help = new TextDialog(onClose ? "Close help" : "Review text help",
+            onClose ? ContextGuide.ReviewClose : ContextGuide.ReviewText, reviewHelpManual);
+        help.ShowDialog(this);
+        (onClose ? (Control)close : body).Focus();
+        return true;
     }
 }

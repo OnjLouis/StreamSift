@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace StreamSift;
 
-internal sealed record Preferences(bool SearchSounds = true, bool CheckUpdatesAtStartup = false,
+internal sealed record Preferences(bool SearchSounds = true, bool CheckUpdatesAtStartup = true,
     string? PlaylistFolder = null, bool AutomaticFallback = false, PlayerChoice MediaPlayer = PlayerChoice.Automatic)
 {
     internal static string UserDirectory => Path.Combine(AppContext.BaseDirectory, "User");

@@ -48,6 +48,7 @@ internal static partial class Extraction
 
     internal static Link? PublicPlayerSource(Uri page)
     {
+        if (TuneIn.Source(page) is Link tuneIn) return tuneIn;
         if (page.IdnHost != "radio.garden" || !page.IsDefaultPort) return null;
         string[] path = page.AbsolutePath.Trim('/').Split('/');
         if (path is not ["listen", { Length: > 0 } slug, { Length: 8 } id] ||
@@ -66,7 +67,17 @@ internal static partial class Extraction
         ServerListing? server = null;
         try
         {
-            if (ServerListings.IsJsonListing(page))
+            if (source.TuneInId != null && TuneIn.IsService(page))
+            {
+                foreach (var entry in trim.Split('\n').Select(line => line.Trim())
+                             .Where(line => line.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+                                            line.StartsWith("http://", StringComparison.OrdinalIgnoreCase)).Take(TuneIn.MaxStreams))
+                {
+                    if (PublicNetwork.TryUrl(entry, null, out var stream))
+                        Add(entry, Playlist(stream) ? LinkKind.Playlist : LinkKind.Audio, source.Name, true);
+                }
+            }
+            else if (source.TuneInId == null && ServerListings.IsJsonListing(page))
                 server = ServerListings.FromJson(trim, page, token);
             else if (page == SwedishRadioChannels)
                 SwedishRadio(trim);
@@ -94,8 +105,12 @@ internal static partial class Extraction
             token.ThrowIfCancellationRequested();
             if (value == null || links.Count >= MaxPageLinks || value.TrimStart().StartsWith('#') ||
                 !PublicNetwork.TryUrl(WebUtility.HtmlDecode(value), relative ?? page, out var uri) ||
+                source.TuneInId != null && !TuneIn.TryClean(uri, source.TuneInId, out uri) ||
                 uri == page || !seen.Add(uri.AbsoluteUri)) return;
-            links.Add(new Link(uri, page, kind, name, hint, nameOrigin, wrapper, keepAddress, listeners));
+            if (source.TuneInId != null && wrapper != null)
+                wrapper = TuneIn.TryClean(wrapper, source.TuneInId, out var cleanWrapper) ? cleanWrapper : null;
+            links.Add(new Link(uri, source.TuneInId == null ? page : source.FoundOn, kind, name, hint, nameOrigin, wrapper,
+                keepAddress, listeners, source.TuneInId));
         }
 
         void Candidate(string raw, string? name, bool explicitAudio = false, Uri? relative = null)

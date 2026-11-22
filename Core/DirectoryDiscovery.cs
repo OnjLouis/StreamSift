@@ -1,4 +1,6 @@
 using System.IO.Compression;
+using System.Net;
+using System.Net.Sockets;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -8,11 +10,16 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
 {
     private const int MaxCatalogueBytes = 96 * 1024 * 1024, MaxMatches = 24;
     private static readonly TimeSpan CacheAge = TimeSpan.FromHours(24), CacheTimeout = TimeSpan.FromSeconds(45);
+    private const string MirrorPool = "all.api.radio-browser.info", MirrorSuffix = ".api.radio-browser.info";
+    private const int MaxDiscoveredMirrors = 3;
+    private static readonly TimeSpan MirrorLookupLimit = TimeSpan.FromSeconds(4), MirrorHeaderLimit = TimeSpan.FromSeconds(6);
+    private static readonly string[] FallbackMirrors = ["de1.api.radio-browser.info", "de2.api.radio-browser.info"];
     private static readonly Uri Catalogue = new("https://de1.api.radio-browser.info/json/stations/search?hidebroken=true&order=votes&reverse=true&limit=70000");
-    private static readonly Uri Mirror = new UriBuilder(Catalogue) { Host = "de2.api.radio-browser.info" }.Uri;
     private static readonly Uri ProviderPage = new("https://www.radio-browser.info/");
     private static readonly Uri Iprd = new("https://iprd-org.github.io/iprd/site_data/metadata/catalog.json");
     private static readonly Uri IprdPage = new("https://iprd-org.github.io/iprd/");
+
+    internal Func<CancellationToken, Task<IReadOnlyList<string?>>> FindMirrors { get; init; } = DiscoverMirrorsAsync;
 
     public async Task<SearchResult> FindAsync(Uri start, CancellationToken cancel, IProgress<int>? progress = null)
     {
@@ -172,21 +179,59 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
 
     private async Task<HttpResponseMessage> OpenCatalogueAsync(CancellationToken token)
     {
-        try
+        var hosts = MirrorOrder(await FindMirrors(token));
+        foreach (var host in hosts)
         {
-            var primary = await OpenAsync(Catalogue);
-            if ((int)primary.StatusCode < 500) return primary;
-            primary.Dispose();
-        }
-        catch (HttpRequestException) when (!token.IsCancellationRequested) { }
-        return await OpenAsync(Mirror);
-
-        async Task<HttpResponseMessage> OpenAsync(Uri endpoint)
-        {
+            token.ThrowIfCancellationRequested();
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+            deadline.CancelAfter(MirrorHeaderLimit);
+            var endpoint = new UriBuilder(Catalogue) { Host = host }.Uri;
             using var request = new HttpRequestMessage(HttpMethod.Get, endpoint);
             request.Headers.UserAgent.ParseAdd("StreamSift/1.0 public-directory-lookup");
-            return await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
+            try
+            {
+                var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+                if (response.IsSuccessStatusCode) return response;
+                response.Dispose();
+            }
+            catch (Exception error) when (!token.IsCancellationRequested &&
+                error is HttpRequestException or OperationCanceledException) { }
         }
+        throw new HttpRequestException("No Radio Browser mirror responded successfully.");
+    }
+
+    // Radio Browser's DNS mirror discovery, suggested by Jeff Bishop (QUILL Radio).
+    private static async Task<IReadOnlyList<string?>> DiscoverMirrorsAsync(CancellationToken cancel)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        deadline.CancelAfter(MirrorLookupLimit);
+        try
+        {
+            var addresses = await Dns.GetHostAddressesAsync(MirrorPool, deadline.Token);
+            var names = addresses.Where(PublicNetwork.IsPublic).Distinct().Take(MaxDiscoveredMirrors * 2)
+                .Select(async address =>
+                {
+                    try { return (await Dns.GetHostEntryAsync(address.ToString(), deadline.Token)).HostName; }
+                    catch (SocketException) { return null; }
+                });
+            return await Task.WhenAll(names).WaitAsync(deadline.Token);
+        }
+        catch (Exception error) when (!cancel.IsCancellationRequested &&
+            error is SocketException or OperationCanceledException or ArgumentException) { return []; }
+    }
+
+    private static string[] MirrorOrder(IEnumerable<string?> discovered)
+    {
+        var hosts = discovered.OfType<string>().Select(name => name.TrimEnd('.').ToLowerInvariant())
+            .Where(IsMirror).Distinct(StringComparer.Ordinal).ToArray();
+        Random.Shared.Shuffle(hosts);
+        return [..hosts.Take(MaxDiscoveredMirrors), ..FallbackMirrors];
+
+        static bool IsMirror(string host) => host.EndsWith(MirrorSuffix, StringComparison.Ordinal) &&
+            !FallbackMirrors.Contains(host, StringComparer.Ordinal) &&
+            host[..^MirrorSuffix.Length] is { Length: > 0 and <= 63 } label &&
+            label[0] != '-' && label[^1] != '-' &&
+            label.All(c => char.IsAsciiLetterLower(c) || char.IsAsciiDigit(c) || c == '-');
     }
 
     private static string HostKey(Uri address)

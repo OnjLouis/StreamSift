@@ -31,6 +31,8 @@ internal static class SearchHistory
         return entries.Where(value => Key(value) != key).Prepend(input).Take(Capacity).ToArray();
     }
 
+    internal static bool CanRemember(string value) => Key(value) != null;
+
     private static string? Key(string value)
     {
         if (value.Length is 0 or > MaxEntryLength || value.Any(c => char.IsControl(c) || c is '?' or '#' or '@')) return null;

@@ -1,4 +1,5 @@
-import Foundation
+import AppKit
+import Carbon.HIToolbox
 
 func selfTest() throws {
     func require(_ passed: @autoclosure () -> Bool, _ label: String) throws {
@@ -12,8 +13,10 @@ func selfTest() throws {
     let defaults = UserDefaults(suiteName: store)!
     defer { defaults.removePersistentDomain(forName: store) }
     var prefs = Preferences(reading: defaults)
-    try require(prefs.sounds && !prefs.startupUpdates && !prefs.automaticFallback && prefs.mediaPlayer == .automatic &&
+    try require(prefs.sounds && prefs.startupUpdates && !prefs.automaticFallback && prefs.mediaPlayer == .automatic &&
                 prefs.folder == Preferences.defaultFolder, "Initial settings")
+    defaults.set(false, forKey: "CheckUpdatesAtStartup")
+    try require(!Preferences(reading: defaults).startupUpdates, "An explicit startup update opt-out stays off")
     defaults.set(true, forKey: "CheckUpdatesAtStartup")
     try require(!Preferences(reading: defaults).automaticFallback, "Older settings leave fallback off")
     prefs.sounds = false
@@ -53,10 +56,106 @@ func selfTest() throws {
     let detail = DetailRow.rows(for: addressed, selectedCount: 2)
     try require(detail.first?.value == addressed.url && detail.first?.address?.absoluteString == addressed.url &&
                 detail.first?.server?.absoluteString == "https://radio.example:9020/" &&
+                detail[0].enterCommand == .search && detail[1].enterCommand == .search &&
                 detail[1].address?.absoluteString == addressed.foundOn && detail[1].server == nil &&
                 detail[2].address == nil && detail.contains { $0.kind == .listeners && $0.value == "0" } &&
                 detail.last?.text == "Selection: Details for the first of 2 streams" &&
                 DetailRow.rows(for: nil, selectedCount: 0).isEmpty, "Detail actions target the raw address and its exact server")
+    let hls = try JSONDecoder().decode(Station.self, from: Data(#"{"name":"Live","url":"https://radio.example:9020/hls/live?token=fixture","format":"HLS","foundOn":"https://radio.example:9020/hls/live?token=fixture"}"#.utf8))
+    let direct = DetailRow.rows(for: hls, selectedCount: 2)
+    try require(LastResults.read(from: defaults) == nil, "No saved results on first launch")
+    let safe = Station(name: "Able", url: "https://radio.example:9020/quiet", format: "AAC", bitrate: 48,
+                       foundOn: "https://radio.example:9020/list", listeners: 0)
+    let stable = Station(name: "Lyd FM", url: "https://radio.example/stream", format: "MP3", bitrate: 320,
+                         foundOn: "https://radio.example/")
+    let local = Station(name: "Local", url: "http://127.0.0.1/stream", format: "MP3", bitrate: 320, foundOn: stable.foundOn)
+    let temporary = Station(name: "Live", url: "https://radio.example/opaque-session/playlist.m3u8", format: "HLS", bitrate: nil,
+                            foundOn: stable.foundOn)
+    let view = ResultView(format: "AAC", order: .listenersDescending)
+    guard let saved = LastResults.capture(input: "radio.example:9020", mode: .passive,
+                                         stations: [addressed, local, temporary, stable, safe, safe], view: view,
+                                         selection: safe.url) else { throw UpdateFailure.invalid("No restorable streams") }
+    try require(saved.stations == [stable, safe], "Only reusable streams are remembered")
+    saved.save(to: defaults)
+    let restored = LastResults.read(from: defaults)
+    try require(restored?.input == "radio.example:9020" && restored?.mode == .passive &&
+                restored?.view.format == "AAC" && restored?.view.order == .listenersDescending &&
+                restored?.view.apply(restored?.stations ?? []) == [safe] && restored?.selection == safe.url,
+                "Reopening preserves the query, method, format, sort and selection")
+    try require(LastResults.capture(input: hls.url, mode: .passive, stations: [safe], view: view, selection: nil) == nil &&
+                LastResults.capture(input: stable.foundOn, mode: .passive, stations: [], view: view, selection: nil) == nil &&
+                LastResults.read(from: defaults)?.stations == [stable, safe], "Unsafe and empty scans leave the snapshot intact")
+    LastResults.clear(in: defaults)
+    try require(LastResults.read(from: defaults) == nil, "New Search forgets the snapshot")
+    defaults.set(Data("{broken".utf8), forKey: "LastResults")
+    try require(LastResults.read(from: defaults) == nil, "Malformed state is ignored")
+    LastResults.clear(in: defaults)
+    let serverRoot = "https://radio.example:9020/"
+    let rooted = Station(name: "Root", url: serverRoot, format: "AAC", bitrate: nil, foundOn: serverRoot)
+    let guides = detail + direct + DetailRow.rows(for: rooted, selectedCount: 1)
+    for item in guides {
+        let lines = ContextGuide.detail(item, canSearch: true).components(separatedBy: "\n")
+        try require(lines.count > 3 && !lines[0].isEmpty && lines[1].isEmpty &&
+                    lines.contains { $0.hasPrefix("Return:") } == (item.enterCommand != nil) &&
+                    lines.contains { $0.hasPrefix("Shift+Return:") } == (item.kind == .streamAddress) &&
+                    lines.contains("F4: Review the full line."), "F1 commands match the focused row")
+    }
+    try require(ContextGuide.detail(direct[0], canSearch: true).contains("Return: Open Save Stream Playlist") &&
+                ContextGuide.detail(direct[1], canSearch: true).contains("Return: Scan the server root") &&
+                ContextGuide.detail(detail[1], canSearch: true).contains("Return: Search the source page.") &&
+                !ContextGuide.detail(direct[0], canSearch: false).contains("\nReturn:") &&
+                !ContextGuide.streams(selected: 2).contains("\nReturn:") && ContextGuide.streams(selected: 1).contains("\nReturn:") &&
+                ContextGuide.reviewText.contains("Command+C: Copy the selection.") &&
+                ContextGuide.reviewClose.hasPrefix("Close returns"), "Distinct help for HLS, source, Streams and review controls")
+    try require(direct[0].enterCommand == .savePlaylist && direct[0].playlistStation == hls &&
+                direct[1].enterCommand == .scanServer && direct[1].server?.absoluteString == serverRoot &&
+                DetailRow.rows(for: rooted, selectedCount: 1)[1].enterCommand == nil,
+                "Detail Return saves HLS or scans the repeated stream origin without looping")
+    let hlsPlaylist = try Playlist.data(direct[0].playlistStation.map { [$0] } ?? [])
+    try require(String(decoding: hlsPlaylist, as: UTF8.self) == "#EXTM3U\r\n#EXTINF:-1,Live\r\n\(hls.url)\r\n",
+                "An HLS detail saves one link, not an HLS manifest")
+    if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .shift, timestamp: 0,
+                                   windowNumber: 0, context: nil, characters: "\r", charactersIgnoringModifiers: "\r",
+                                   isARepeat: false, keyCode: UInt16(kVK_Return)),
+       let review = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                    windowNumber: 0, context: nil, characters: functionFour, charactersIgnoringModifiers: functionFour,
+                                    isARepeat: false, keyCode: UInt16(kVK_F4)) {
+        let detailTable = DetailTable()
+        detailTable.configure()
+        detailTable.showRows(direct)
+        var scanned: [String] = []
+        var reviewed: String?
+        detailTable.onCommand = { command, row in
+            if command == .scanServer, let server = row.server { scanned.append(server.absoluteString) }
+            if command == .review { reviewed = row.text }
+        }
+        detailTable.keyDown(with: event)
+        try require(scanned == [serverRoot], "Shift+Return scans an HLS Stream address, rather than saving it")
+        detailTable.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        detailTable.keyDown(with: event)
+        detailTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        detailTable.canSearch = false
+        detailTable.keyDown(with: event)
+        try require(scanned == [serverRoot], "Shift+Return does not scan Found on or interrupt a busy search")
+        detailTable.keyDown(with: review)
+        try require(reviewed == direct[0].text && reviewed?.contains(hls.url) == true,
+                    "F4 reviews the full detail line, even when a new scan is unavailable")
+        let streams = StreamTable()
+        streams.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("Test stream")))
+        streams.dataSource = detailTable
+        streams.reloadData()
+        streams.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        var opened = false
+        var requestedReview = false
+        streams.openPlayer = { opened = true }
+        streams.reviewLine = { requestedReview = true }
+        streams.keyDown(with: event)
+        try require(opened, "Shift+Return in Streams still saves and opens the playlist")
+        streams.keyDown(with: review)
+        try require(requestedReview, "F4 on a stream requests line review")
+    } else {
+        throw UpdateFailure.invalid("Could not create the keyboard test events")
+    }
     let unknown = Station(name: "Local", url: "https://radio.example/local", format: "MP3", bitrate: nil, foundOn: "")
     let mixed = [unknown, row, quiet]
     try require(ResultView.formats(mixed) == ["AAC", "MP3"] && ResultView.formats([quiet]) == ["AAC"],

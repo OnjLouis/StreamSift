@@ -320,6 +320,43 @@ var lookalike = await engine.FindAsync(new Uri("https://radio.garden.other.examp
 Require(lookalike.Stations.Count == 0 && handler.Seen.Count == beforeLookalike + 1,
     "An unrelated host cannot trigger the Radio Garden provider.");
 
+const string tunePage = "https://tunein.com/radio/Test-FM-s12345/";
+const string tuneApi = "https://opml.radiotime.com/Tune.ashx?id=s12345&partnerId=RadioTime&formats=mp3,aac,ogg,hls";
+const string tuneMount = "https://broadcast.example/tune-in?quality=high";
+const string tuneEdge = "https://broadcast.example/tune-edge?quality=high";
+handler.Text(tuneApi, """
+    https://broadcast.example/tune-in?quality=high&lat=1&lon=2&ads.%73essionId=private
+    https://broadcast.example/promoted?ads.stationId=s55555
+    http://127.0.0.1:8000/internal
+    """, "text/plain");
+handler.Redirect(tuneMount, tuneEdge + "&listener_id=private");
+handler.Audio(tuneEdge, mp3, "Broadcaster Test FM");
+var beforeTuneIn = handler.Seen.Count;
+var tuneIn = await engine.FindAsync(new Uri(tunePage + "?sessionId=private"), CancellationToken.None);
+Require(tuneIn.Stations is [{ Name: "Broadcaster Test FM", Format: "MP3" }] &&
+    tuneIn.Stations[0].Url.AbsoluteUri == tuneEdge && tuneIn.Stations[0].FoundOn.AbsoluteUri == tunePage &&
+    handler.Seen.Skip(beforeTuneIn).SequenceEqual([tuneApi, tuneMount, tuneEdge]),
+    "TuneIn verifies the actual station and strips listener data from requests, redirects, and results.");
+handler.Text(tuneApi, """
+    https://broadcast.example/tune-list.m3u?session-id=private
+    https://broadcast.example/tune-promo
+    """, "text/plain");
+handler.Text("https://broadcast.example/tune-list.m3u", "#EXTM3U\n/tune-in?quality=high&latitude=0", "audio/x-mpegurl");
+handler.Redirect("https://broadcast.example/tune-promo", "https://broadcast.example/promoted?ads.station_id=s55555");
+beforeTuneIn = handler.Seen.Count;
+tuneIn = await engine.FindAsync(new Uri(tunePage), CancellationToken.None);
+Require(tuneIn.Stations is [{ Name: "Broadcaster Test FM" }] &&
+    handler.Seen.Skip(beforeTuneIn).Contains("https://broadcast.example/tune-list.m3u") &&
+    !handler.Seen.Skip(beforeTuneIn).Any(url => url.Contains("/promoted") || url.Contains("private") || url.Contains("latitude")),
+    "TuneIn cleanup follows nested playlists and redirects without probing another station.");
+foreach (var other in new[] { "https://tunein.com/show/Test-FM-s12345/",
+        "https://tunein.com:8000/radio/Test-FM-s12345/", "https://tunein.com.other.example/radio/Test-FM-s12345/" })
+{
+    beforeTuneIn = handler.Seen.Count;
+    await engine.FindAsync(new Uri(other), CancellationToken.None);
+    Require(handler.Seen.Skip(beforeTuneIn).SequenceEqual([other]), "Unrelated pages do not activate the TuneIn route.");
+}
+
 handler.Text("https://stationhub.example/", """
     <a href="https://stream.stationhub.example/">Stream Endpoint List</a>
     <a href="https://stream.stationhub.example.unrelated.example/">Stream Endpoint List</a>
@@ -451,7 +488,15 @@ handler.Text(iprdApi, """
 var directoryCache = Directory.CreateTempSubdirectory("streamsift-directory-test-");
 try
 {
-    var lookup = new DirectoryDiscovery(fixtureClient, directoryCache.FullName);
+    int mirrorLookups = 0;
+    var lookup = new DirectoryDiscovery(fixtureClient, directoryCache.FullName)
+    {
+        FindMirrors = _ =>
+        {
+            mirrorLookups++;
+            return Task.FromResult<IReadOnlyList<string?>>([]);
+        }
+    };
     int beforeDirectory = handler.Seen.Count;
     var listed = await lookup.FindAsync(new Uri(directoryHome), CancellationToken.None);
     Require(listed.Stations is [{ Name: "Named local news", Format: "MP3" }] &&
@@ -462,7 +507,7 @@ try
     int beforeCached = handler.Seen.Count;
     var cachedDirectory = await lookup.FindAsync(new Uri(directoryHome), CancellationToken.None);
     Require(cachedDirectory.Stations is [{ Name: "Named local news" }] &&
-        !handler.Seen.Skip(beforeCached).Contains(directoryApi),
+        !handler.Seen.Skip(beforeCached).Contains(directoryApi) && mirrorLookups == 1,
         "A fresh public catalogue should be reused without a network request to the directory.");
     int beforeMissing = handler.Seen.Count;
     var missing = await lookup.FindAsync(new Uri("https://directory-fixture.example/unlisted-channel"), CancellationToken.None);
@@ -515,16 +560,24 @@ finally { directoryCache.Delete(recursive: true); }
 
 handler.Fail(directoryApi, HttpStatusCode.BadGateway);
 var directoryMirror = new UriBuilder(directoryApi) { Host = "de2.api.radio-browser.info" }.Uri.AbsoluteUri;
+var discoveredMirror = new UriBuilder(directoryApi) { Host = "test1.api.radio-browser.info" }.Uri.AbsoluteUri;
+handler.Fail(discoveredMirror, HttpStatusCode.TooManyRequests);
 handler.Text(directoryMirror,
     """[{"homepage":"https://www.directory-fixture.example/news","name":"Mirror station","url":"https://radio.example/main-mount"}]""",
     "application/json");
 var mirrorCache = Directory.CreateTempSubdirectory("streamsift-directory-test-");
 try
 {
-    var viaMirror = await new DirectoryDiscovery(fixtureClient, mirrorCache.FullName)
-        .FindAsync(new Uri(directoryHome), CancellationToken.None);
-    Require(viaMirror.Stations is [{ Name: "Mirror station" }] && handler.Seen.Contains(directoryMirror),
-        "Retry a failing directory server on its public mirror.");
+    var lookup = new DirectoryDiscovery(fixtureClient, mirrorCache.FullName)
+    {
+        FindMirrors = _ => Task.FromResult<IReadOnlyList<string?>>(["TEST1.api.radio-browser.info.", "test1.api.radio-browser.info",
+            "de2.api.radio-browser.info", "hostile.example", "a.b.api.radio-browser.info", "-invalid.api.radio-browser.info"])
+    };
+    var beforeMirror = handler.Seen.Count;
+    var viaMirror = await lookup.FindAsync(new Uri(directoryHome), CancellationToken.None);
+    Require(viaMirror.Stations is [{ Name: "Mirror station" }] &&
+        handler.Seen.Skip(beforeMirror).Take(3).SequenceEqual([discoveredMirror, directoryApi, directoryMirror]),
+        "Try an approved discovered mirror once, then ordered fallbacks if it is rate-limited.");
 }
 finally { mirrorCache.Delete(recursive: true); }
 

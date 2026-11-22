@@ -6,6 +6,8 @@ struct DetailRow: Equatable {
     let kind: Kind
     let label: String
     let value: String
+    var playlistStation: Station? = nil
+    var foundOnIsStream = false
     var text: String { label + ": " + value }
 
     var address: URL? {
@@ -16,19 +18,31 @@ struct DetailRow: Equatable {
     }
 
     var server: URL? {
-        guard kind == .streamAddress, let address,
+        guard kind == .streamAddress || foundOnIsStream, let address,
               var parts = URLComponents(url: address, resolvingAgainstBaseURL: false) else { return nil }
+        parts.user = nil
+        parts.password = nil
         parts.path = "/"
         parts.query = nil
         parts.fragment = nil
         return parts.url
     }
 
+    var enterCommand: DetailTable.Command? {
+        guard let address else { return nil }
+        if playlistStation != nil { return .savePlaylist }
+        guard foundOnIsStream else { return .search }
+        guard let server, server.absoluteString != address.absoluteString else { return nil }
+        return .scanServer
+    }
+
     static func rows(for station: Station?, selectedCount: Int) -> [DetailRow] {
         guard let station else { return [] }
         var rows = [
-            DetailRow(kind: .streamAddress, label: "Stream address", value: station.url),
-            DetailRow(kind: .foundOn, label: "Found on", value: station.foundOn),
+            DetailRow(kind: .streamAddress, label: "Stream address", value: station.url,
+                      playlistStation: station.format == "HLS" ? station : nil),
+            DetailRow(kind: .foundOn, label: "Found on", value: station.foundOn,
+                      foundOnIsStream: station.foundOn == station.url),
             DetailRow(kind: .station, label: "Station", value: station.name),
             DetailRow(kind: .format, label: "Format", value: station.format),
             DetailRow(kind: .bitrate, label: "Bitrate", value: station.bitrate.map { "\($0) kbps" } ?? "not reported")
@@ -44,7 +58,7 @@ struct DetailRow: Equatable {
 }
 
 final class DetailTable: NSTableView, NSTableViewDataSource, NSTableViewDelegate {
-    enum Command { case search, openBrowser, copy }
+    enum Command { case search, openBrowser, copy, scanServer, savePlaylist, review }
     private(set) var rows: [DetailRow] = []
     var canSearch = true
     var onCommand: ((Command, DetailRow) -> Void)?
@@ -66,7 +80,7 @@ final class DetailTable: NSTableView, NSTableViewDataSource, NSTableViewDelegate
         dataSource = self
         delegate = self
         target = self
-        doubleAction = #selector(searchSelected)
+        doubleAction = #selector(activateSelected)
     }
 
     func showRows(_ next: [DetailRow]) {
@@ -96,14 +110,24 @@ final class DetailTable: NSTableView, NSTableViewDataSource, NSTableViewDelegate
         if let selectedDetail { onCommand?(.copy, selectedDetail) }
     }
 
-    @objc private func searchSelected() {
-        if canSearch, let selectedDetail, selectedDetail.address != nil { onCommand?(.search, selectedDetail) }
+    @objc private func activateSelected() {
+        if canSearch, let selectedDetail, let command = selectedDetail.enterCommand { onCommand?(command, selectedDetail) }
     }
 
     override func keyDown(with event: NSEvent) {
         let flags = event.modifierFlags.intersection([.control, .option, .shift, .command])
+        if flags.isEmpty, event.keyCode == kVK_F4, let selectedDetail {
+            onCommand?(.review, selectedDetail)
+            return
+        }
         if event.keyCode == kVK_Return || event.keyCode == kVK_ANSI_KeypadEnter {
-            if flags.isEmpty { searchSelected(); return }
+            if flags.isEmpty { activateSelected(); return }
+            if flags == .shift {
+                if canSearch, let selectedDetail, selectedDetail.kind == .streamAddress, selectedDetail.server != nil {
+                    onCommand?(.scanServer, selectedDetail)
+                }
+                return
+            }
             if flags == .option, let selectedDetail, selectedDetail.address != nil {
                 onCommand?(.openBrowser, selectedDetail)
                 return

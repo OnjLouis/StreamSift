@@ -17,18 +17,20 @@ internal sealed class MainForm : Form
         Dock = DockStyle.Fill, TabIndex = 2
     };
     private readonly DetailList details = new() { Dock = DockStyle.Fill, TabIndex = 4 };
-    private readonly TextBox status = new() { AccessibleName = "Status", ReadOnly = true, Dock = DockStyle.Fill, TabIndex = 5 };
+    private readonly TextBox status = new() { AccessibleName = "Status", ReadOnly = true, Dock = DockStyle.Fill, TabIndex = 6 };
     private readonly Label streamsLabel = new() { Text = "&Streams:", AutoSize = true, Anchor = AnchorStyles.Left, TabIndex = 1 };
     private readonly Label detailsLabel = new() { Text = "Stream &Details:", AutoSize = true, Anchor = AnchorStyles.Left, TabIndex = 3 };
+    private readonly Label statusLabel = new() { Text = "Stat&us:", AutoSize = true, Anchor = AnchorStyles.Left, TabIndex = 5 };
     private readonly Dictionary<Control, string> help = new();
     private readonly ToolStripMenuItem copyCommand, saveCommand, openFolderCommand, foobarCommand, openPlayerCommand, previewCommand, preferencesCommand, updateCommand;
-    private readonly ToolStripMenuItem browserCommand, directoryCommand, streamsCommand, detailsCommand, refreshCommand;
+    private readonly ToolStripMenuItem browserCommand, directoryCommand, streamsCommand, detailsCommand, statusCommand, refreshCommand;
     private readonly ToolStripMenuItem filterCommand, findResultCommand, nextResultCommand, previousResultCommand, openBrowserCommand;
     private readonly ToolStripMenuItem clearHistoryCommand;
     private readonly SearchSounds sounds = new();
     private readonly System.Windows.Forms.Timer handoffs = new() { Interval = 30000 };
     private Preferences preferences = Preferences.Load(Preferences.UserDirectory);
     private string[] history;
+    private readonly bool restoreLastResults;
     private Station[] searchResults = [], visibleResults = [];
     private ResultView resultView;
     private string resultQuery = "";
@@ -44,6 +46,7 @@ internal sealed class MainForm : Form
     internal MainForm(bool readHistory = true)
     {
         history = readHistory ? SearchHistory.Load(Preferences.UserDirectory) : [];
+        restoreLastResults = readHistory;
         Text = Program.Name;
         ClientSize = new(720, 480);
         MinimumSize = new(540, 370);
@@ -76,13 +79,14 @@ internal sealed class MainForm : Form
         openPlayerCommand = MenuCommand.Create("Save and open in default player", OpenInDefaultPlayer, display: "Shift+Enter");
         streamsCommand = MenuCommand.Create("Go to Streams", results.Select, Keys.Alt | Keys.S);
         detailsCommand = MenuCommand.Create("Go to Stream Details", details.Select, Keys.Alt | Keys.D);
+        statusCommand = MenuCommand.Create("Go to Status", status.Select, Keys.Alt | Keys.U);
         filterCommand = MenuCommand.Create("Filter and sort...", ShowResultFilter, Keys.Control | Keys.L);
         findResultCommand = MenuCommand.Create("Find in results...", () => ShowResultFind(), Keys.Control | Keys.F);
         nextResultCommand = MenuCommand.Create("Find next", () => FindResult(false), Keys.F3);
         previousResultCommand = MenuCommand.Create("Find previous", () => FindResult(true), Keys.Shift | Keys.F3);
         actions.DropDownItems.AddRange([browserCommand, directoryCommand, refreshCommand, new ToolStripSeparator(),
             previewCommand, openBrowserCommand, copyCommand, foobarCommand, openPlayerCommand, new ToolStripSeparator(),
-            streamsCommand, detailsCommand, filterCommand, findResultCommand, nextResultCommand, previousResultCommand]);
+            streamsCommand, detailsCommand, statusCommand, filterCommand, findResultCommand, nextResultCommand, previousResultCommand]);
         var options = new ToolStripMenuItem("&Options");
         preferencesCommand = MenuCommand.Create("Preferences...", ShowPreferences, Keys.Control | Keys.Oemcomma, "Ctrl+,");
         options.DropDownItems.Add(preferencesCommand);
@@ -130,25 +134,28 @@ internal sealed class MainForm : Form
                 case StreamAction.Preview: Preview(); break;
                 case StreamAction.SelectAll: SelectAllStreams(); break;
                 case StreamAction.OpenBrowser: OpenInBrowser(); break;
+                case StreamAction.Review when results.CurrentLine is string line: ReviewLine(results, line); break;
             }
         };
         results.Resize += (_, _) => results.Columns[0].Width =
             Math.Max(145, results.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 4);
         details.Command += RunDetailAction;
 
-        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Padding = new(12) };
+        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7, Padding = new(12) };
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 120));
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         grid.Controls.Add(entry, 0, 0);
         grid.Controls.Add(streamsLabel, 0, 1);
         grid.Controls.Add(results, 0, 2);
         grid.Controls.Add(detailsLabel, 0, 3);
         grid.Controls.Add(details, 0, 4);
-        grid.Controls.Add(status, 0, 5);
+        grid.Controls.Add(statusLabel, 0, 5);
+        grid.Controls.Add(status, 0, 6);
         Controls.Add(grid);
         Controls.Add(menus);
 
@@ -156,15 +163,17 @@ internal sealed class MainForm : Form
         help[find] = "Scan the address for live audio, or look up a station name in public radio directories.";
         help[findBrowser] = "Look for live audio using a temporary, muted browser. Requires Chrome or Microsoft Edge.";
         help[cancel] = "Stop the current search. You can also press Escape.";
-        help[results] = "F5 repeats the current search. Ctrl+L filters and sorts, Ctrl+F finds text, and Ctrl+A selects all visible streams. Enter plays one stream; Alt+Enter opens its address in your browser.";
-        help[details] = "Use the arrow keys to review the first selected stream. Enter searches the selected address; Alt+Enter opens it in your browser. Ctrl+C copies the row value. Use the context menu to scan the stream server. Alt+S returns to Streams.";
+        help[results] = ContextGuide.Streams(0);
+        help[details] = "Select a row in Stream Details to read its available commands.";
         help[status] = "Review the last result or operation. A search with no results does not prove that the website has no live stream.";
         find.Click += async (_, _) => await FindAsync();
         findBrowser.Click += async (_, _) => await FindAsync(SearchMethod.Browser);
         cancel.Click += (_, _) => scan?.Cancel();
         Shown += async (_, _) =>
         {
-            url.Focus();
+            if (restoreLastResults && LastResults.Load(Preferences.UserDirectory) is LastResults saved)
+                ApplyLastResults(saved);
+            else url.Focus();
             CleanHandoffs();
             await CheckAtStartupAsync();
         };
@@ -179,6 +188,7 @@ internal sealed class MainForm : Form
                 return;
             }
             closing = true;
+            RememberLastResults();
             scan?.Cancel();
             startupUpdate?.Cancel();
         };
@@ -192,6 +202,25 @@ internal sealed class MainForm : Form
 
     private Station[] SelectedStreams() =>
         results.SelectedItems.Cast<ListViewItem>().OrderBy(row => row.Index).Select(row => (Station)row.Tag!).ToArray();
+
+    private void ApplyLastResults(LastResults saved)
+    {
+        lastSearch = (saved.Input, saved.Method);
+        url.Text = saved.Input;
+        searchResults = saved.Stations;
+        resultView = saved.View;
+        RenderResults(preserveSelection: false, restoredSelection: saved.Selection);
+        SetStatus($"Restored {visibleResults.Length} {(visibleResults.Length == 1 ? "stream" : "streams")} from a saved search. Press F5 to refresh.");
+        results.Focus();
+    }
+
+    private void RememberLastResults()
+    {
+        if (!restoreLastResults || searchResults.Length == 0 || lastSearch is not { } last) return;
+        var selection = (results.FocusedItem?.Tag as Station)?.Url ?? Selected?.Url;
+        try { LastResults.Capture(last.Input, last.Method, searchResults, resultView, selection)?.Save(Preferences.UserDirectory); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+    }
 
     private void SelectAllStreams()
     {
@@ -254,6 +283,7 @@ internal sealed class MainForm : Form
             status.Focus();
             return;
         }
+        RememberLastResults();
         var operation = new CancellationTokenSource();
         scan = operation;
         waitForScanOnClose = fallback || mode != SearchMethod.Passive;
@@ -299,6 +329,7 @@ internal sealed class MainForm : Form
             var previousFormat = resultView.Format;
             if (refreshing) resultView = resultView.RetainAvailable(searchResults);
             RenderResults(preserveSelection: refreshing);
+            RememberLastResults();
             focusResults = visibleResults.Length != 0;
             var sourceLabel = found.Stations.Count == 0 && run.Attempts > 1 ? "Automatic search: " : run.Method switch
             {
@@ -497,12 +528,13 @@ internal sealed class MainForm : Form
             (station.Listeners is int count ? ", " + ResultView.ListenerLabel(count) : ""))
         { Tag = station };
 
-    private void RenderResults(bool preserveSelection)
+    private void RenderResults(bool preserveSelection, Uri? restoredSelection = null)
     {
         var next = resultView.Apply(searchResults);
         if (!visibleResults.SequenceEqual(next))
         {
-            var selected = preserveSelection ? SelectedStreams().Select(s => s.Url).ToHashSet() : [];
+            HashSet<Uri> selected = preserveSelection ? SelectedStreams().Select(s => s.Url).ToHashSet() :
+                restoredSelection != null ? [restoredSelection] : [];
             var focused = (results.FocusedItem?.Tag as Station)?.Url;
             visibleResults = next;
             var names = DisplayNames(next);
@@ -591,6 +623,9 @@ internal sealed class MainForm : Form
             case DetailAction.ScanServer when row.Server is Uri server:
                 _ = FindAsync(newInput: server.AbsoluteUri);
                 break;
+            case DetailAction.SavePlaylist when row.PlaylistStation is Station station:
+                Export([station]);
+                break;
             case DetailAction.OpenBrowser when row.Address is Uri address:
                 OpenAddressInBrowser(address);
                 break;
@@ -600,6 +635,9 @@ internal sealed class MainForm : Form
                     Clipboard.SetText(row.Value);
                     SetStatus(row.Label + " copied.");
                 });
+                break;
+            case DetailAction.Review:
+                ReviewLine(details, row.Text);
                 break;
         }
     }
@@ -616,6 +654,16 @@ internal sealed class MainForm : Form
     private void ResetSearch()
     {
         if (scan != null) return;
+        if (restoreLastResults)
+        {
+            try { LastResults.Clear(Preferences.UserDirectory); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                SetStatus("The saved results could not be cleared. Try New Search again.");
+                status.Focus();
+                return;
+            }
+        }
         lastSearch = null;
         url.SelectedIndex = -1;
         url.Text = "";
@@ -651,9 +699,10 @@ internal sealed class MainForm : Form
         });
     }
 
-    private void Export()
+    private void Export() => Export(SelectedStreams());
+
+    private void Export(Station[] stations)
     {
-        var stations = SelectedStreams();
         if (stations.Length == 0) return;
         SafeAction(() =>
         {
@@ -788,8 +837,11 @@ internal sealed class MainForm : Form
     private void ShowHelp()
     {
         var focused = help.Keys.FirstOrDefault(c => c.ContainsFocus);
-        using var dialog = new TextDialog("Context help",
-            focused == null ? help[url] : help[focused], OpenManual);
+        var (title, text) = focused == details && details.SelectedDetail is DetailRow row
+            ? (row.Label + " help", ContextGuide.Detail(row, details.CanSearch))
+            : focused == results ? ("Streams help", ContextGuide.Streams(results.SelectedItems.Count))
+            : ("Context help", focused == null ? help[url] : help[focused]);
+        using var dialog = new TextDialog(title, text, OpenManual);
         dialog.ShowDialog(this);
         if (focused?.CanFocus == true) focused.Focus();
     }
@@ -798,6 +850,13 @@ internal sealed class MainForm : Form
     {
         using var dialog = new TextDialog(title, body);
         dialog.ShowDialog(this);
+    }
+
+    private void ReviewLine(Control source, string line)
+    {
+        using var dialog = new TextDialog("Review text", line, wordWrap: false, reviewHelpManual: OpenManual);
+        dialog.ShowDialog(this);
+        if (source.CanFocus) source.Focus();
     }
 
     private void OpenManual() => SafeAction(() => Open(Path.Combine(AppContext.BaseDirectory, "Manual.html")));
@@ -816,9 +875,10 @@ internal sealed class MainForm : Form
     internal int CheckControls()
     {
         if (!string.Equals(results.AccessibilityObject.KeyboardShortcut, "Alt+S", StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(details.AccessibilityObject.KeyboardShortcut, "Alt+D", StringComparison.OrdinalIgnoreCase))
+            !string.Equals(details.AccessibilityObject.KeyboardShortcut, "Alt+D", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(status.AccessibilityObject.KeyboardShortcut, "Alt+U", StringComparison.OrdinalIgnoreCase))
         {
-            Console.Error.WriteLine($"Mnemonic bindings: website '{url.AccessibilityObject.KeyboardShortcut}', streams '{results.AccessibilityObject.KeyboardShortcut}', details '{details.AccessibilityObject.KeyboardShortcut}'.");
+            Console.Error.WriteLine($"Mnemonic bindings: website '{url.AccessibilityObject.KeyboardShortcut}', streams '{results.AccessibilityObject.KeyboardShortcut}', details '{details.AccessibilityObject.KeyboardShortcut}', status '{status.AccessibilityObject.KeyboardShortcut}'.");
             return 2;
         }
         var page = url.Parent!;
@@ -845,6 +905,7 @@ internal sealed class MainForm : Form
             directoryCommand.ShortcutKeys == (Keys.Control | Keys.Shift | Keys.D) &&
             streamsCommand.ShortcutKeys == (Keys.Alt | Keys.S) && streamsCommand.ShortcutKeyDisplayString == "Alt+S" &&
             detailsCommand.ShortcutKeys == (Keys.Alt | Keys.D) && detailsCommand.ShortcutKeyDisplayString == "Alt+D" &&
+            statusCommand.ShortcutKeys == (Keys.Alt | Keys.U) && statusCommand.ShortcutKeyDisplayString == "Alt+U" &&
             filterCommand.ShortcutKeys == (Keys.Control | Keys.L) && findResultCommand.ShortcutKeys == (Keys.Control | Keys.F) &&
             nextResultCommand.ShortcutKeys == Keys.F3 && previousResultCommand.ShortcutKeys == (Keys.Shift | Keys.F3) &&
             refreshCommand.ShortcutKeys == Keys.F5 && !refreshCommand.Enabled &&
@@ -888,6 +949,8 @@ internal sealed class MainForm : Form
         ok &= DisplayNames([a, b]) is ["Theme (example.com/fallback)", "Theme (example.com/themestream)"] &&
             DisplayNames([a]) is ["Theme"];
         ok &= !results.TabStop && !details.TabStop && status.TabStop && !streamsCommand.Enabled && !detailsCommand.Enabled;
+        statusCommand.PerformClick();
+        ok &= statusCommand.Enabled && ActiveControl == status && panel.GetNextControl(statusLabel, true) == status;
         _ = results.Handle;
         _ = details.Handle;
         var row = results.Items.Add(ResultRow(a, a.Name));
@@ -917,10 +980,84 @@ internal sealed class MainForm : Form
         ok &= results.SelectedItems.Count == 2 && SelectedStreams().SequenceEqual([a, b]) &&
             saveCommand.Enabled && !previewCommand.Enabled && copyCommand.Text == "Copy stream addresses" &&
             details.Items.Cast<ListViewItem>().Any(item => item.Text == "Selection: Details for the first of 2 streams");
+        secondRow.Focused = true;
+        ok &= results.CurrentLine == secondRow.Text;
         var testOrigin = new Uri("https://example.com:9020/song?token=fixture");
         var rows = DetailRow.Rows(a with { Url = testOrigin }, 1);
         ok &= rows[0].Value == testOrigin.AbsoluteUri && rows[0].Server?.AbsoluteUri == "https://example.com:9020/" &&
             rows[1].Server == null && DetailRow.Rows(null, 0).Length == 0;
+        var hls = a with { Url = testOrigin, FoundOn = testOrigin, Format = "HLS", IsHls = true };
+        var direct = DetailRow.Rows(hls, 2);
+        var root = new Uri("https://example.com:9020/");
+        var rootRows = DetailRow.Rows(a with { Url = root, FoundOn = root }, 1);
+        bool detailDefaults = DetailList.ActionFor(Keys.Enter, direct[0], true) == DetailAction.SavePlaylist &&
+            direct[0].PlaylistStation == hls &&
+            DetailList.ActionFor(Keys.Enter, direct[1], true) == DetailAction.ScanServer &&
+            direct[1].Server == root && DetailList.ActionFor(Keys.Enter, rootRows[1], true) == null &&
+            DetailList.ActionFor(Keys.Enter, rows[1], true) == DetailAction.Search;
+        if (!detailDefaults) Console.Error.WriteLine("Details must save HLS, scan a repeated stream origin, and search a distinct source.");
+        ok &= detailDefaults;
+        var scanKey = Keys.Shift | Keys.Enter;
+        bool scanShortcut = DetailList.ActionFor(scanKey, direct[0], true) == DetailAction.ScanServer &&
+            DetailList.ActionFor(scanKey, rows[0], true) == DetailAction.ScanServer &&
+            DetailList.ActionFor(scanKey, direct[0], false) == null &&
+            DetailList.ActionFor(scanKey, direct[1], true) == null &&
+            DetailList.ActionFor(scanKey, rows[2], true) == null &&
+            DetailList.MenuItems(direct[0], true).Any(item => item.Id == (int)DetailAction.ScanServer &&
+                item.Enabled && item.Caption.EndsWith("\tShift+Enter", StringComparison.Ordinal));
+        if (!scanShortcut) Console.Error.WriteLine("Shift+Enter must scan only the selected Stream address row and appear in its menu.");
+        ok &= scanShortcut;
+        bool reviewShortcut = StreamList.MenuItems(true).Any(item => item.Enabled &&
+                item.Caption.EndsWith("\tF4", StringComparison.Ordinal)) &&
+            StreamList.MenuItems(false).Any(item => item.Enabled &&
+                item.Caption.EndsWith("\tF4", StringComparison.Ordinal)) &&
+            Enum.GetValues<DetailKind>().All(kind =>
+            {
+                var detail = new DetailRow(kind, "Label", "Value");
+                return DetailList.ActionFor(Keys.F4, detail, false) == DetailAction.Review &&
+                    DetailList.MenuItems(detail, false).Any(item => item.Enabled && item.Id == (int)DetailAction.Review &&
+                        item.Caption.EndsWith("\tF4", StringComparison.Ordinal));
+            });
+        if (!reviewShortcut) Console.Error.WriteLine("F4 review must be available in both row menus.");
+        ok &= reviewShortcut;
+        var guides = rows.Concat(direct).Concat(rootRows).ToArray();
+        bool focusedGuides = guides.All(item =>
+        {
+            var lines = ContextGuide.Detail(item, true).Split("\r\n");
+            return lines.Length > 3 && lines[0].Length > 0 && lines[1].Length == 0 &&
+                lines.Any(line => line.StartsWith("Enter:", StringComparison.Ordinal)) == (item.EnterAction != null) &&
+                lines.Any(line => line.StartsWith("Shift+Enter:", StringComparison.Ordinal)) == (item.Kind == DetailKind.StreamAddress) &&
+                lines.Contains("F4: Review the full line.");
+        }) && ContextGuide.Detail(direct[0], true).Contains("Enter: Open Save Stream Playlist") &&
+            ContextGuide.Detail(direct[1], true).Contains("Enter: Scan the server root") &&
+            ContextGuide.Detail(rows[1], true).Contains("Enter: Search the source page.") &&
+            !ContextGuide.Detail(direct[0], false).Contains("\r\nEnter:") &&
+            !ContextGuide.Streams(2).Contains("\r\nEnter:") && ContextGuide.Streams(1).Contains("\r\nEnter:") &&
+            ContextGuide.ReviewText.Contains("Ctrl+C: Copy the selection.") && ContextGuide.ReviewClose.StartsWith("Close returns", StringComparison.Ordinal);
+        if (!focusedGuides) Console.Error.WriteLine("F1 guidance does not match the focused row or control.");
+        ok &= focusedGuides;
+        using (var review = new TextDialog("Review text", direct[0].Text, wordWrap: false))
+        {
+            ok &= !review.ShowInTaskbar && review.CancelButton is Button &&
+                review.Controls[0].Controls.OfType<TextBox>().Single() is { ReadOnly: true, WordWrap: false } text &&
+                text.Text == direct[0].Text && text.TabIndex == 0;
+        }
+        static bool UniqueMnemonics(IEnumerable<(int Id, string Caption, bool Enabled)> menu)
+        {
+            var captions = menu.Select(item => item.Caption.Split('\t')[0]).ToArray();
+            return captions.All(caption => caption.Count(ch => ch == '&') == 1 && caption[^1] != '&') &&
+                captions.Select(caption => char.ToUpperInvariant(caption[caption.IndexOf('&') + 1]))
+                    .Distinct().Count() == captions.Length;
+        }
+        ok &= UniqueMnemonics(StreamList.MenuItems(true)) && UniqueMnemonics(StreamList.MenuItems(false)) &&
+            rows.Concat(direct).Concat(rootRows).All(item =>
+            {
+                var menu = DetailList.MenuItems(item, true);
+                var defaults = menu.Where(command => command.Caption.EndsWith("\tEnter", StringComparison.Ordinal)).ToArray();
+                return UniqueMnemonics(menu) && defaults.Length == (item.EnterAction == null ? 0 : 1) &&
+                    (defaults.Length == 0 || defaults[0].Id == (int)item.EnterAction!.Value) &&
+                    menu.Select(command => command.Id).Distinct().Count() == menu.Count;
+            });
         history = ["second.example", "first.example"];
         url.Text = "current.example";
         RefreshHistory();
@@ -942,6 +1079,13 @@ internal sealed class MainForm : Form
         resultQuery = "Theme";
         ResetSearch();
         ok &= resultView == default && resultQuery.Length == 0 && !filterCommand.Enabled && !findResultCommand.Enabled && !refreshCommand.Enabled;
+        ApplyLastResults(new LastResults("example.com", SearchMethod.Passive, [a, b],
+            new ResultView(Order: ResultOrder.NameAscending), b.Url));
+        ok &= url.Text == "example.com" && status.Text.StartsWith("Restored 2 streams", StringComparison.Ordinal) &&
+            refreshCommand.Enabled && Selected?.Url == b.Url && ActiveControl == results &&
+            details.SelectedDetail?.Address == b.Url;
+        ResetSearch();
+        ok &= url.Text.Length == 0 && results.Items.Count == 0 && !refreshCommand.Enabled;
         ok &= !results.TabStop && !details.TabStop && status.TabStop && !streamsCommand.Enabled && !detailsCommand.Enabled;
         return ok ? 0 : 1;
     }

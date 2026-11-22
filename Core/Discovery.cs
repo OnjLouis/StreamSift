@@ -9,7 +9,8 @@ public sealed record SearchResult(IReadOnlyList<Station> Stations, int Requests,
 internal enum LinkKind { Audio, Playlist, Player, DedicatedPlayer, Script, Catalogue, ServerStatus }
 internal enum NameOrigin { Inferred, Directory, Playlist }
 internal sealed record Link(Uri Url, Uri FoundOn, LinkKind Kind, string? Name = null, bool AudioHint = false,
-    NameOrigin NameOrigin = NameOrigin.Inferred, Uri? Wrapper = null, bool KeepAddress = false, int? Listeners = null);
+    NameOrigin NameOrigin = NameOrigin.Inferred, Uri? Wrapper = null, bool KeepAddress = false, int? Listeners = null,
+    string? TuneInId = null);
 
 public sealed class Discovery(HttpClient client)
 {
@@ -54,8 +55,9 @@ public sealed class Discovery(HttpClient client)
         {
             var catalogue = Extraction.OfficialCatalogue(start);
             preferred = catalogue != null ? new Link(catalogue, start, LinkKind.Catalogue) : Extraction.PublicPlayerSource(start);
+            if (preferred?.TuneInId != null) start = preferred.FoundOn;
             if (preferred != null) Queue(preferred, 0);
-            Queue(new Link(start, start, LinkKind.Player), 0);
+            Queue(new Link(start, start, LinkKind.Player, TuneInId: preferred?.TuneInId), 0);
         }
         else
         {
@@ -98,9 +100,9 @@ public sealed class Discovery(HttpClient client)
                         if (requests == requestLimit) throw new HttpRequestException("Request limit reached.");
                         requests++;
                         progress?.Report(requests + serverRequests);
-                    }, token);
+                    }, token, item.Link.TuneInId);
                     var final = response.RequestMessage?.RequestUri ?? uri;
-                    var status = observed == null && entry
+                    var status = observed == null && entry && item.Link.TuneInId == null
                         ? ServerListings.AdvertisedStatus(final, Header(response, "Server"), Header(response, "icy-notice2")) : null;
                     if (status != null)
                         Queue(new Link(status, final, LinkKind.ServerStatus), 1);
@@ -298,7 +300,7 @@ public sealed class Discovery(HttpClient client)
         return mirror.All(char.IsAsciiDigit) ? suffix + uri.PathAndQuery : null;
     }
 
-    private async Task<HttpResponseMessage> Fetch(Uri uri, Action count, CancellationToken token)
+    private async Task<HttpResponseMessage> Fetch(Uri uri, Action count, CancellationToken token, string? tuneInId = null)
     {
         for (var hop = 0; hop <= MaxRedirects; hop++)
         {
@@ -316,6 +318,8 @@ public sealed class Discovery(HttpClient client)
             {
                 if (response.Headers.Location is not Uri location || !PublicNetwork.TryUrl(location.OriginalString, uri, out var next))
                     throw new HttpRequestException("The redirect does not lead to a public HTTP or HTTPS address.");
+                if (tuneInId != null && !TuneIn.TryClean(next, tuneInId, out next))
+                    throw new HttpRequestException("The redirect points to a different TuneIn station.");
                 uri = next;
             }
         }
