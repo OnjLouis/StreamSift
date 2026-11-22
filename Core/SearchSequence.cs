@@ -6,9 +6,21 @@ public sealed record SearchRun(SearchResult Result, SearchMethod Method, int Att
 
 public sealed class SearchSequence(HttpClient client, string? cacheDirectory = null)
 {
-    public Task<SearchRun> FindAsync(Uri address, SearchMethod first, bool fallback, CancellationToken cancel,
-        Action<SearchMethod, int>? starting = null) =>
-        RunAsync(first, fallback, (method, token) => RunMethod(address, method, token), cancel, starting);
+    public Task<SearchRun> FindAsync(string input, SearchMethod first, bool fallback, CancellationToken cancel,
+        Action<SearchMethod, int>? starting = null)
+    {
+        if (!PublicNetwork.TryInput(input, out var address)) throw new ArgumentException("Invalid public address.");
+        var plain = ImplicitHttpAlternative(input, address);
+        return RunAsync(first, fallback, (method, token) => RunMethod(address, plain, method, token), cancel, starting);
+    }
+
+    internal static Uri? ImplicitHttpAlternative(string input, Uri address)
+    {
+        if (input.Contains("://", StringComparison.Ordinal) || address.IsDefaultPort || address.Query.Length != 0)
+            return null;
+        var alternative = new UriBuilder(address) { Scheme = "http", Port = address.Port };
+        return PublicNetwork.TryUrl(alternative.Uri.AbsoluteUri, null, out var safe) ? safe : null;
+    }
 
     public static bool CanSearchStation(string input)
     {
@@ -32,9 +44,9 @@ public sealed class SearchSequence(HttpClient client, string? cacheDirectory = n
         return new SearchRun(result, SearchMethod.Directory, 1, 0);
     }
 
-    private Task<SearchResult> RunMethod(Uri address, SearchMethod method, CancellationToken token) => method switch
+    private Task<SearchResult> RunMethod(Uri address, Uri? plain, SearchMethod method, CancellationToken token) => method switch
     {
-        SearchMethod.Passive => new Discovery(client).FindAsync(address, token),
+        SearchMethod.Passive => new Discovery(client).FindInferredAsync(address, plain, token),
         SearchMethod.Browser when BrowserDiscovery.IsAvailable => new BrowserDiscovery(client).FindAsync(address, token),
         SearchMethod.Browser => throw new InvalidOperationException("Browser search requires Chrome or Microsoft Edge."),
         SearchMethod.Directory => new DirectoryDiscovery(client, cacheDirectory).FindAsync(address, token),

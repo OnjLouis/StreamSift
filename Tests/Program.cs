@@ -74,7 +74,7 @@ if (args.Length > 0)
     foreach (var input in trace == null ? args : args[1..])
     {
         if (!PublicNetwork.TryInput(input, out var address)) throw new ArgumentException("Invalid public address.");
-        var live = await new Discovery(production).FindAsync(address, CancellationToken.None);
+        var live = (await new SearchSequence(production).FindAsync(input, SearchMethod.Passive, false, CancellationToken.None)).Result;
         Console.WriteLine($"{address.Host}: {live.Stations.Count} stream(s); {live.Requests} requests; {live.Unreachable} unavailable; limit {live.LimitReached}");
         foreach (var station in live.Stations) Console.WriteLine($"{station.Name} | {station.Format} | {station.Bitrate} | {station.Url} | {station.FoundOn}");
     }
@@ -610,6 +610,118 @@ var proxy = await engine.FindAsync(new Uri("https://proxy.example/"), Cancellati
 Require(proxy.Stations is [{ Name: "Example Radio", Url.Port: 8000 }] && proxy.Requests == 4,
     "Directory with unproxied mount falls back to one advertised playlist.");
 
+const string customRoot = "https://stations.example/";
+const int customCount = 288;
+string Card(string path, string? title = null) => $"""
+    <div class="stream-container">
+        <div><div class="stream-name">Mount Point {path}</div><a href="{path}.m3u">M3U</a></div>
+        <table class="stream"><tr><td>Stream Title:</td><td>{title ?? $"Named {path}"}</td></tr>
+        <tr><td>Content Type:</td><td>audio/mpeg</td></tr>
+        <tr><td>Stream URL:</td><td><a href="{path}">Direct</a></td></tr></table>
+    </div>
+    """;
+handler.Text(customRoot, string.Concat(Enumerable.Range(1, customCount).Select(i => Card($"/channel{i}"))) +
+    Card("//not-the-listing.example/foreign") + Card("/admin/stats"));
+for (int i = 1; i <= customCount; i++)
+    handler.Audio(customRoot + $"channel{i}", mp3, name: "Generic metadata");
+handler.Audio(customRoot + "channel29", mp3, finite: true);
+int beforeCustom = handler.Seen.Count;
+var custom = await engine.FindAsync(new Uri(customRoot), CancellationToken.None);
+Require(custom.Stations.Count == customCount - 1 && custom.Requests == customCount + 1 && !custom.LimitReached &&
+    custom.Stations.Any(station => station.Name == "Named /channel288") &&
+    handler.Seen.Skip(beforeCustom).All(url => !url.EndsWith(".m3u") && !url.Contains("/admin") && url.StartsWith(customRoot)),
+    "Recognize a large custom server listing, reject non-live entries, and skip wrappers and unrelated addresses.");
+const string namesRoot = "https://named-listing.example/";
+handler.Text(namesRoot, Card("/CapitalCymru", "Capital North Wales") + Card("/CapitalLondon", "Capital London") +
+    Card("/CapitalNewcastle", "Capital North East"));
+foreach (var mount in new[] { "CapitalCymru", "CapitalLondon", "CapitalNewcastle" })
+    handler.Audio(namesRoot + mount, mp3, name: mount);
+var namedListing = await engine.FindAsync(new Uri(namesRoot), CancellationToken.None);
+Require(namedListing.Stations.Select(s => s.Name).SequenceEqual(["Capital London", "Capital North East", "Capital North Wales"]),
+    "Server listing results sort by displayed station name, not mount order.");
+handler.Fail(customRoot + "channel1", HttpStatusCode.TooManyRequests);
+var rateLimited = await engine.FindAsync(new Uri(customRoot), CancellationToken.None);
+Require(rateLimited is { Requests: 5, LimitReached: true } && rateLimited.Stations.Count == 3,
+    "A rate-limited server stops after the current batch and reports a partial search.");
+
+const string jsonIce = "https://status-fixture.example:9443/";
+handler.Fail(jsonIce, HttpStatusCode.NotFound, "Icecast 2.4.4");
+handler.Text(jsonIce + "status-json.xsl", """
+    {"icestats":{"source":[
+      {"listenurl":"http://localhost:9001/farm.ogg","server_name":"Farm","title":"Current song","server_type":"application/ogg","listeners":0},
+      {"listenurl":"http://status-fixture.example:9001/radio","server_name":"Local Radio","server_type":"audio/mpeg","bitrate":"128","listeners":"12"},
+      {"listenurl":"https://unrelated.example/protected?key=hidden","server_type":"audio/mpeg"},
+      {"listenurl":"http://localhost:9001/admin/stats","server_type":"audio/mpeg"},
+      {"listenurl":"http://localhost:9001/video","server_type":"video/webm"}
+    ]}}
+    """, "application/json");
+handler.Audio(jsonIce + "farm.ogg", "OggS    vorbis"u8.ToArray(), type: "application/ogg");
+handler.Audio(jsonIce + "radio", mp3);
+int beforeJsonIce = handler.Seen.Count;
+var iceJson = await engine.FindAsync(new Uri(jsonIce), CancellationToken.None);
+Require(iceJson.Stations is [{ Name: "Farm", Format: "Ogg Vorbis", Listeners: 0 }, { Name: "Local Radio", Bitrate: 128, Listeners: 12 }] &&
+    handler.Seen.Skip(beforeJsonIce).SequenceEqual([jsonIce, jsonIce + "status-json.xsl", jsonIce + "farm.ogg", jsonIce + "radio"]),
+    "Recognize Icecast even if its status homepage is missing, and use the public origin instead of a published backend.");
+var singleStream = await engine.FindAsync(new Uri(jsonIce + "radio"), CancellationToken.None);
+Require(singleStream is { Requests: 1 } && singleStream.Stations is [{ Listeners: null }],
+    "An exact mount never enumerates its server's other streams.");
+
+const string barePort = "port-fixture.example:8000";
+const string plainPort = "http://port-fixture.example:8000/";
+const string securePort = "https://port-fixture.example:8000/";
+handler.NetworkFailure(securePort);
+handler.Text(plainPort, """
+    <title>Icecast Streaming Media Server</title>
+    <div class="roundcont"><div class="newscontent">
+      <div class="streamheader"><h3>Mount Point /jamulus: Unspecified name</h3><a href="/jamulus.m3u">Listen</a></div>
+      <table><tr><td>Stream Title:</td><td>Unspecified name</td></tr>
+      <tr><td>Content Type:</td><td>audio/mpeg</td></tr>
+      <tr><td>Current Listeners:</td><td>4</td></tr><tr><td>Peak Listeners:</td><td>99</td></tr></table>
+    </div></div>
+    """);
+handler.Audio(plainPort + "jamulus", mp3, "Jamulus fixture");
+var sequence = new SearchSequence(fixtureClient);
+int beforePlain = handler.Seen.Count;
+var inferred = await sequence.FindAsync(barePort, SearchMethod.Passive, false, CancellationToken.None);
+Require(inferred.Result.Stations is [{ Name: "Jamulus fixture", Url.Port: 8000, Listeners: 4 }] &&
+    handler.Seen.Skip(beforePlain).SequenceEqual([securePort, plainPort, plainPort + "jamulus"]),
+    "A bare nonstandard port can retry HTTP after TLS fails and read a legacy Icecast listing.");
+int beforeExplicit = handler.Seen.Count;
+var noDowngrade = await sequence.FindAsync(securePort, SearchMethod.Passive, false, CancellationToken.None);
+Require(noDowngrade.Result.Stations.Count == 0 && handler.Seen.Skip(beforeExplicit).SequenceEqual([securePort]),
+    "An explicitly HTTPS address must never be retried over HTTP.");
+int beforeQuery = handler.Seen.Count;
+handler.NetworkFailure(securePort + "?selector=fixture");
+_ = await sequence.FindAsync(barePort + "?selector=fixture", SearchMethod.Passive, false, CancellationToken.None);
+Require(handler.Seen.Skip(beforeQuery).SequenceEqual([securePort + "?selector=fixture"]),
+    "Never send an entered query string to a lower-security scheme.");
+
+const string shoutStatus = "https://shout-fixture.example:2530/statistics?json=1";
+handler.Text(shoutStatus, """
+    {"version":"2.6.1.777","streams":[
+      {"streamstatus":1,"streampath":"/","servertitle":"Unique fixture","content":"audio/mpeg","bitrate":128,"currentlisteners":6,"peaklisteners":99},
+      {"streamstatus":0,"streampath":"/offline","servertitle":"Off Air","content":"audio/mpeg"},
+      {"streamstatus":1,"streampath":"//unrelated.example/stream","content":"audio/mpeg"}
+    ]}
+    """, "application/json");
+handler.Audio("https://shout-fixture.example:2530/", mp3);
+var shout = await engine.FindAsync(new Uri(shoutStatus), CancellationToken.None);
+Require(shout.Stations is [{ Name: "Unique fixture", Bitrate: 128, Listeners: 6 }] && shout.Requests == 2,
+    "SHOUTcast public status selects advertised active streams only.");
+
+const string locusMap = "https://locusonus.org/soundmap/";
+const string locusApi = "https://locusonus.org/soundmap/list/active/json/name";
+handler.Text(locusApi, """
+    [{"name":"Active microphone","url":"https://locus.creacast.com:9443/site.mp3","ext":"mp3"},
+     {"name":"Invalid entry","url":"http://127.0.0.1/no.mp3","ext":"mp3"}]
+    """, "application/json");
+handler.Audio("https://locus.creacast.com:9443/site.mp3", mp3);
+int beforeLocus = handler.Seen.Count;
+var locus = await engine.FindAsync(new Uri(locusMap), CancellationToken.None);
+Require(locus.Stations is [{ Name: "Active microphone" }] &&
+    handler.Seen.Skip(beforeLocus).SequenceEqual([locusApi, "https://locus.creacast.com:9443/site.mp3"]),
+    "Use the soundmap's own list, including off-site public streams, without requiring a browser.");
+
 handler.Text("https://radio.example/large", "<title>Many links</title>" + string.Concat(Enumerable.Range(0, 150)
     .Select(i => $"<audio src='/stream{i}.mp3'></audio>")));
 var bounded = await engine.FindAsync(new Uri("https://radio.example/large"), CancellationToken.None);
@@ -660,7 +772,14 @@ sealed class Fixture : HttpMessageHandler
     };
     public void Redirect(string uri, string to) => fixtures[uri] = () =>
         new(HttpStatusCode.Redirect) { Headers = { Location = new Uri(to) } };
-    public void Fail(string uri, HttpStatusCode status) => fixtures[uri] = () => new(status);
+    public void Fail(string uri, HttpStatusCode status, string? server = null) => fixtures[uri] = () =>
+    {
+        var response = new HttpResponseMessage(status);
+        if (server != null) response.Headers.TryAddWithoutValidation("Server", server);
+        return response;
+    };
+    public void NetworkFailure(string uri) => fixtures[uri] = () =>
+        throw new HttpRequestException(HttpRequestError.SecureConnectionError, "Fixture HTTPS handshake failed.");
 
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
     {

@@ -30,7 +30,7 @@ int length = await Console.In.ReadBlockAsync(input);
 if (length == input.Length) return 3;
 var searchText = new string(input, 0, length);
 bool nameInput = SearchSequence.CanSearchStation(searchText);
-bool hasAddress = PublicNetwork.TryInput(searchText, out var address) && !nameInput;
+bool hasAddress = PublicNetwork.TryInput(searchText, out _) && !nameInput;
 bool stationSearch = nameInput && method != SearchMethod.Browser;
 if (!hasAddress && !stationSearch) return 3;
 if (stationSearch) method = SearchMethod.Directory;
@@ -46,7 +46,7 @@ try
 {
     var sequence = new SearchSequence(client);
     run = stationSearch ? await sequence.FindStationAsync(searchText, cancellation.Token) :
-        await sequence.FindAsync(address, method, fallback, cancellation.Token, (next, number) =>
+        await sequence.FindAsync(searchText, method, fallback, cancellation.Token, (next, number) =>
     {
         if (number > 1)
         {
@@ -73,11 +73,11 @@ catch (Exception error) when (method == SearchMethod.Directory && (error is IOEx
 }
 var found = run.Result;
 var output = new Reply(found.Stations.Select(s => new ResultRow(s.Name, s.Url.AbsoluteUri, s.Format, s.Bitrate,
-    s.FoundOn.AbsoluteUri)).ToArray(), found.Requests, found.Unreachable, found.LimitReached, Argument(run.Method), run.Attempts, run.FailedMethods);
+    s.FoundOn.AbsoluteUri, s.Listeners)).ToArray(), found.Requests, found.Unreachable, found.LimitReached, Argument(run.Method), run.Attempts, run.FailedMethods);
 await JsonSerializer.SerializeAsync(Console.OpenStandardOutput(), output, ScannerJson.Default.Reply);
 return 0;
 
-internal sealed record ResultRow(string Name, string Url, string Format, int? Bitrate, string FoundOn);
+internal sealed record ResultRow(string Name, string Url, string Format, int? Bitrate, string FoundOn, int? Listeners);
 internal sealed record Reply(ResultRow[] Stations, int Requests, int Unreachable, bool LimitReached, string Method, int Attempts, int FailedMethods);
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]

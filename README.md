@@ -4,12 +4,21 @@ StreamSift finds public live audio streams behind radio websites. It has
 native Windows and Mac apps with keyboard-operated results, address copying,
 M3U8 export and opening in the system's default playlist player. The Windows
 app can also send streams to an installed copy of foobar2000.
+Enter or Return plays a selected result in VLC or FastPlay on both platforms,
+or foobar2000 on Windows. This does not add a saved playlist. Saving and
+opening a playlist still uses the system default.
+The editable address field remembers the last ten successful searches.
+Select multiple results to save them as one playlist.
+Results can be filtered by format, sorted by name, bitrate or reported
+listener count, and searched without rescanning the website.
 
 Read the [Windows manual](Manual.html) or [Mac manual](Mac/Manual.html).
 Normal scans do not execute site JavaScript. The optional Find with Browser
 command uses an installed Chrome or Edge in a temporary session without
 sharing your browser profile or logins.
 Website scans recognise supported SecureNet and Triton player pages. The
+same search also understands publicly advertised server listings, including
+Icecast, SHOUTcast, Global and the Locus Sonus soundmap. The
 public-directory command matches websites against Radio Browser; station
 names and call signs are matched against Radio Browser and the
 [International Public Radio Directory](https://iprd-org.github.io/iprd/).

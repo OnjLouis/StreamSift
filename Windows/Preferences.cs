@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace StreamSift;
 
 internal sealed record Preferences(bool SearchSounds = true, bool CheckUpdatesAtStartup = false,
-    string? PlaylistFolder = null, bool AutomaticFallback = false)
+    string? PlaylistFolder = null, bool AutomaticFallback = false, PlayerChoice MediaPlayer = PlayerChoice.Automatic)
 {
     internal static string UserDirectory => Path.Combine(AppContext.BaseDirectory, "User");
     internal static string DefaultPlaylistFolder => Path.Combine(UserDirectory, "Playlists");
@@ -19,7 +19,11 @@ internal sealed record Preferences(bool SearchSounds = true, bool CheckUpdatesAt
             using var file = File.OpenRead(path);
             if (file.Length > 16384) return fallback;
             var saved = JsonSerializer.Deserialize<Preferences>(file);
-            return saved == null ? fallback : saved with { PlaylistFolder = NormalizeFolder(saved.PlaylistFolder) };
+            return saved == null ? fallback : saved with
+            {
+                PlaylistFolder = NormalizeFolder(saved.PlaylistFolder),
+                MediaPlayer = Enum.IsDefined(saved.MediaPlayer) ? saved.MediaPlayer : PlayerChoice.Automatic
+            };
         }
         catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {

@@ -1,14 +1,56 @@
 import Foundation
 
-struct Station: Decodable {
+enum MediaPlayerChoice: String, CaseIterable {
+    case automatic, vlc, fastPlay
+    var title: String {
+        switch self {
+        case .automatic: return "Automatic"
+        case .vlc: return "VLC"
+        case .fastPlay: return "FastPlay"
+        }
+    }
+
+    var bundleIdentifier: String? {
+        switch self {
+        case .automatic: return nil
+        case .vlc: return "org.videolan.vlc"
+        case .fastPlay: return "com.fastplay.macos"
+        }
+    }
+}
+
+enum StreamPreview {
+    static func target(choice: MediaPlayerChoice, associated: URL?, associatedIdentifier: String?,
+                       installed: (String) -> URL?) -> (MediaPlayerChoice, URL)? {
+        let supported = [MediaPlayerChoice.vlc, .fastPlay]
+        if choice == .automatic, let associated, let associatedIdentifier,
+           let preferred = supported.first(where: { $0.bundleIdentifier == associatedIdentifier }) {
+            return (preferred, associated)
+        }
+        for player in (choice == .automatic ? supported : [choice]) {
+            if let id = player.bundleIdentifier, let path = installed(id) { return (player, path) }
+        }
+        return nil
+    }
+
+    static func address(_ station: Station) -> URL? {
+        guard let parts = URLComponents(string: station.url), ["http", "https"].contains(parts.scheme ?? ""),
+              let host = parts.host, !host.isEmpty, parts.user == nil, parts.password == nil else { return nil }
+        return parts.url
+    }
+}
+
+struct Station: Decodable, Equatable {
     let name: String
     let url: String
     let format: String
     let bitrate: Int?
     let foundOn: String
+    var listeners: Int?
 
     func listLabel(named displayName: String) -> String {
-        [displayName, format, bitrate.map { "\($0) kbps" }].compactMap { $0 }.joined(separator: ", ")
+        [displayName, format, bitrate.map { "\($0) kbps" }, listeners.map(ResultView.listenerLabel)]
+            .compactMap { $0 }.joined(separator: ", ")
     }
 }
 
@@ -32,7 +74,7 @@ struct SearchResult: Decodable {
 }
 
 enum StreamError: LocalizedError {
-    case invalidAddress, browserAddress, search, browserRequired, browserSearch, directorySearch, playlist, tooManyNames
+    case invalidAddress, browserAddress, search, browserRequired, browserSearch, directorySearch, playlist, tooManyNames, tooManyHandoffs
 
     var errorDescription: String? {
         switch self {
@@ -44,6 +86,7 @@ enum StreamError: LocalizedError {
         case .directorySearch: return "Public directory lookup could not finish."
         case .playlist: return "The stream does not have a public HTTP or HTTPS address."
         case .tooManyNames: return "There are too many playlists with that name in the selected folder."
+        case .tooManyHandoffs: return "Too many playlists were sent recently. Try again in two minutes."
         }
     }
 }
@@ -164,20 +207,29 @@ enum Playlist {
         return value.isEmpty ? "Stream" : value
     }
 
-    static func data(_ station: Station) throws -> Data {
-        guard !station.url.contains(where: \.isNewline),
-              let address = URLComponents(string: station.url), ["http", "https"].contains(address.scheme ?? ""),
-              address.host != nil, address.user == nil, address.password == nil else { throw StreamError.playlist }
-        let name = String(station.name.prefix(160).map { character in
-            character.isNewline || character.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) } ? " " : character
-        })
-        return Data("#EXTM3U\r\n#EXTINF:-1,\(name)\r\n\(station.url)\r\n".utf8)
+    static func stem(_ stations: [Station]) -> String {
+        stations.count == 1 ? stem(stations[0].name) : "Streams"
     }
 
-    static func saveNew(_ station: Station, in folder: URL) throws -> URL {
-        let data = try data(station)
+    static func data(_ stations: [Station]) throws -> Data {
+        guard !stations.isEmpty else { throw StreamError.playlist }
+        var text = "#EXTM3U\r\n"
+        for station in stations {
+            guard !station.url.contains(where: \.isNewline), let address = StreamPreview.address(station) else {
+                throw StreamError.playlist
+            }
+            let name = String(station.name.prefix(160).map { character in
+                character.isNewline || character.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) } ? " " : character
+            }).trimmingCharacters(in: .whitespaces)
+            text += "#EXTINF:-1,\(name)\r\n\(address.absoluteString)\r\n"
+        }
+        return Data(text.utf8)
+    }
+
+    static func saveNew(_ stations: [Station], in folder: URL) throws -> URL {
+        let data = try data(stations)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let name = stem(station.name)
+        let name = stem(stations)
         for index in 1...100 {
             let file = folder.appendingPathComponent(index == 1 ? "\(name).m3u8" : "\(name) (\(index)).m3u8")
             do {
@@ -194,6 +246,7 @@ struct Preferences: Equatable {
     var sounds = true
     var startupUpdates = false
     var automaticFallback = false
+    var mediaPlayer = MediaPlayerChoice.automatic
     var customFolder: String?
 
     static var defaultFolder: URL {
@@ -212,6 +265,7 @@ struct Preferences: Equatable {
         sounds = (defaults.object(forKey: "SearchSounds") as? Bool) ?? true
         startupUpdates = defaults.bool(forKey: "CheckUpdatesAtStartup")
         automaticFallback = defaults.bool(forKey: "AutomaticFallback")
+        mediaPlayer = MediaPlayerChoice(rawValue: defaults.string(forKey: "MediaPlayer") ?? "") ?? .automatic
         customFolder = Self.validFolder(defaults.string(forKey: "PlaylistFolder") ?? "")
     }
 
@@ -219,6 +273,7 @@ struct Preferences: Equatable {
         defaults.set(sounds, forKey: "SearchSounds")
         defaults.set(startupUpdates, forKey: "CheckUpdatesAtStartup")
         defaults.set(automaticFallback, forKey: "AutomaticFallback")
+        defaults.set(mediaPlayer.rawValue, forKey: "MediaPlayer")
         defaults.set(customFolder, forKey: "PlaylistFolder")
     }
 

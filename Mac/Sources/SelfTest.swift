@@ -12,31 +12,106 @@ func selfTest() throws {
     let defaults = UserDefaults(suiteName: store)!
     defer { defaults.removePersistentDomain(forName: store) }
     var prefs = Preferences(reading: defaults)
-    try require(prefs.sounds && !prefs.startupUpdates && !prefs.automaticFallback && prefs.folder == Preferences.defaultFolder, "Initial settings")
+    try require(prefs.sounds && !prefs.startupUpdates && !prefs.automaticFallback && prefs.mediaPlayer == .automatic &&
+                prefs.folder == Preferences.defaultFolder, "Initial settings")
     defaults.set(true, forKey: "CheckUpdatesAtStartup")
     try require(!Preferences(reading: defaults).automaticFallback, "Older settings leave fallback off")
     prefs.sounds = false
     prefs.startupUpdates = true
     prefs.automaticFallback = true
+    prefs.mediaPlayer = .vlc
     prefs.customFolder = root.path
     prefs.save(to: defaults)
     try require(prefs == Preferences(reading: defaults), "Settings round trip")
+    var history = SearchHistory(reading: defaults)
+    try require(history.entries.isEmpty, "No default history")
+    let failed = history.remember("radio.example/no-stream", verifiedStreams: 0, in: defaults)
+    try require(!failed, "An unsuccessful search is not remembered")
+    for address in ["radio.example/live?token=private", "radio.example/live#private", "https://user@radio.example/live"] {
+        let saved = history.remember(address, verifiedStreams: 1, in: defaults)
+        try require(!saved, "Sensitive addresses are not remembered")
+    }
+    for index in 0...SearchHistory.capacity {
+        _ = history.remember("radio.example/\(index)", verifiedStreams: 1, in: defaults)
+    }
+    try require(history.entries.count == 10 && history.entries.first == "radio.example/10" &&
+                history.entries.last == "radio.example/1", "Newest first and oldest evicted")
+    _ = history.remember(" RADIO.EXAMPLE/5 ", verifiedStreams: 1, in: defaults)
+    try require(history.entries.first == "RADIO.EXAMPLE/5" && !history.entries.contains("radio.example/5") &&
+                SearchHistory(reading: defaults).entries == history.entries, "Deduplicated history survives relaunch")
+    history.clear(in: defaults)
+    try require(SearchHistory(reading: defaults).entries.isEmpty && Preferences(reading: defaults) == prefs,
+                "Clear only search history")
     try require(Preferences.validFolder("path/to/folder") == nil &&
                 Preferences.validFolder("/tmp/\nfolder") == nil, "Invalid paths")
     try require(Playlist.stem("...") == "Stream" && Playlist.stem("a/b:c") == "a_b_c", "Playlist filenames")
     let row = Station(name: "Lyd \u{e9}\nFM", url: "https://radio.example/stream", format: "MP3", bitrate: 320,
                       foundOn: "https://radio.example/")
+    let quiet = Station(name: "Able", url: "https://radio.example/quiet", format: "AAC", bitrate: 48, foundOn: "")
+    let unknown = Station(name: "Local", url: "https://radio.example/local", format: "MP3", bitrate: nil, foundOn: "")
+    let mixed = [unknown, row, quiet]
+    try require(ResultView.formats(mixed) == ["AAC", "MP3"] && ResultView.formats([quiet]) == ["AAC"],
+                "Format choices are derived from the current results")
+    try require(ResultView(format: "AAC").apply(mixed) == [quiet] && ResultView().apply(mixed) == mixed &&
+                ResultView(order: .bitrateDescending).apply(mixed) == [row, quiet, unknown] &&
+                ResultView(order: .bitrateAscending).apply(mixed) == [quiet, row, unknown], "Filter and bitrate order")
+    try require(ResultView.find(in: mixed, after: -1, query: "LYD E", backwards: false) == 1 &&
+                ResultView.find(in: mixed, after: 1, query: "MP3", backwards: false) == 0 &&
+                ResultView.find(in: mixed, after: 0, query: "MP3", backwards: true) == 1 &&
+                ResultView.find(in: [quiet], after: -1, query: "MP3", backwards: false) == nil, "Find wraps within the visible set")
+    let zero = try JSONDecoder().decode(Station.self, from: Data(#"{"name":"Zero","url":"https://radio.example/zero","format":"MP3","foundOn":"","listeners":0}"#.utf8))
+    let busy = Station(name: "Busy", url: "https://radio.example/busy", format: "MP3", bitrate: nil, foundOn: "", listeners: 12)
+    try require(zero.listLabel(named: "Zero") == "Zero, MP3, 0 listeners" &&
+                ResultView(order: .listenersDescending).apply([row, zero, busy]) == [busy, zero, row] &&
+                ResultView(order: .listenersAscending).apply([row, zero, busy]) == [zero, busy, row], "Listener counts including zero, with unknown last")
+    let choice = ResultView(format: "MP3", order: .listenersDescending)
+    let retained = choice.retainingAvailable(in: [zero, quiet])
+    let dropped = choice.retainingAvailable(in: [quiet])
+    try require(retained.format == "MP3" && retained.order == .listenersDescending &&
+                dropped.format == nil && dropped.order == .search, "Refresh retains only available choices")
     let expected = "#EXTM3U\r\n#EXTINF:-1,Lyd \u{e9} FM\r\nhttps://radio.example/stream\r\n"
-    let first = try Playlist.saveNew(row, in: root)
-    let second = try Playlist.saveNew(row, in: root)
+    let first = try Playlist.saveNew([row], in: root)
+    let second = try Playlist.saveNew([row], in: root)
     let firstBytes = try Data(contentsOf: first)
     try require(first != second && firstBytes == Data(expected.utf8) && second.lastPathComponent.contains(" (2)."),
                 "UTF-8 export without overwrite")
     let bad = Station(name: "Bad", url: "file:///tmp/private", format: "MP3", bitrate: nil, foundOn: "")
+    try require(StreamPreview.address(row)?.absoluteString == row.url && StreamPreview.address(bad) == nil,
+                "Preview passes only a network address and needs no playlist")
     do {
-        _ = try Playlist.data(bad)
+        _ = try Playlist.data([row, bad])
         throw UpdateFailure.invalid("Accepted a file URL")
     } catch StreamError.playlist {}
+    let selection = (1...288).map { index in
+        Station(name: "Station \(index)", url: "https://radio.example/\(index)", format: row.format,
+                bitrate: row.bitrate, foundOn: row.foundOn)
+    }
+    let batch = try Playlist.saveNew(selection, in: root)
+    let batchText = try String(contentsOf: batch, encoding: .utf8)
+    try require(batch.lastPathComponent == "Streams.m3u8" &&
+                batchText.components(separatedBy: "\r\n").filter { $0.hasPrefix("https://") } == selection.map(\.url),
+                "One playlist contains all 288 selected results in their order")
+    let fastPlay = root.appendingPathComponent("FastPlay.app")
+    let vlc = root.appendingPathComponent("VLC.app")
+    func installed(_ id: String) -> URL? {
+        id == MediaPlayerChoice.fastPlay.bundleIdentifier ? fastPlay : id == MediaPlayerChoice.vlc.bundleIdentifier ? vlc : nil
+    }
+    try require(StreamPreview.target(choice: .automatic, associated: fastPlay,
+                    associatedIdentifier: MediaPlayerChoice.fastPlay.bundleIdentifier, installed: installed)?.0 == .fastPlay &&
+                StreamPreview.target(choice: .vlc, associated: fastPlay,
+                    associatedIdentifier: MediaPlayerChoice.fastPlay.bundleIdentifier, installed: installed)?.1 == vlc,
+                "FastPlay association and explicit VLC selection use different native targets")
+    let temp = root.appendingPathComponent("handoffs", isDirectory: true)
+    let tempFirst = try PlaybackHandoff.stage(row, in: temp)
+    let tempSecond = try PlaybackHandoff.stage(row, in: temp)
+    let beforeCleanup = try Data(contentsOf: tempFirst)
+    try require(tempFirst != tempSecond && beforeCleanup == Data(expected.utf8), "Two distinct FastPlay handoffs contain one correct stream each")
+    let extra = temp.appendingPathComponent("unrelated.m3u8")
+    try Data(expected.utf8).write(to: extra)
+    let remaining = try PlaybackHandoff.prune(in: temp, now: Date().addingTimeInterval(PlaybackHandoff.retention + 5))
+    try require(remaining == 0 && FileManager.default.fileExists(atPath: extra.path) &&
+                !FileManager.default.fileExists(atPath: tempFirst.path) &&
+                !FileManager.default.fileExists(atPath: tempSecond.path), "Expired handoffs are removed without touching unrelated playlists")
     try require(row.listLabel(named: "Test Station") == "Test Station, MP3, 320 kbps" &&
                 bad.listLabel(named: "No Bitrate") == "No Bitrate, MP3", "Station, codec and available bitrate share one result")
 

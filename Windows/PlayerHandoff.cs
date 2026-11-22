@@ -1,7 +1,93 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace StreamSift;
+
+internal enum PlayerChoice { Automatic, Vlc, Foobar2000, FastPlay }
+
+internal static class StreamPreview
+{
+    internal sealed record Player(string Executable, PlayerChoice Kind)
+    {
+        internal string Name => DisplayName(Kind);
+    }
+
+    internal static string DisplayName(PlayerChoice choice) => choice switch
+    {
+        PlayerChoice.Vlc => "VLC",
+        PlayerChoice.Foobar2000 => "Foobar2000",
+        PlayerChoice.FastPlay => "FastPlay",
+        _ => "Automatic"
+    };
+
+    internal static Player? FindPlayer(PlayerChoice choice)
+    {
+        const uint associatedExecutable = 2;
+        var associated = new StringBuilder(4096);
+        uint length = (uint)associated.Capacity;
+        string? association = AssocQueryString(0, associatedExecutable, ".m3u8", null, associated, ref length) == 0
+            ? associated.ToString() : null;
+        var roots = new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86) }.Where(root => root.Length != 0).Distinct();
+        return ResolvePlayer(choice, association, roots);
+    }
+
+    internal static Player? ResolvePlayer(PlayerChoice choice, string? association, IEnumerable<string> roots)
+    {
+        bool Matches(PlayerChoice kind) => choice == PlayerChoice.Automatic || choice == kind;
+        if (association != null && Supported(association) is Player preferred && Matches(preferred.Kind)) return preferred;
+
+        (PlayerChoice Kind, string Relative)[] candidates =
+            [(PlayerChoice.Vlc, Path.Combine("VideoLAN", "VLC", "vlc.exe")),
+             (PlayerChoice.Foobar2000, Path.Combine("foobar2000", "foobar2000.exe")),
+             (PlayerChoice.FastPlay, Path.Combine("FastPlay", "FastPlay.exe"))];
+        foreach (var (kind, relative) in candidates)
+        {
+            if (!Matches(kind)) continue;
+            foreach (var root in roots)
+            {
+                string path = Path.Combine(root, relative);
+                if (Supported(path) is Player installed) return installed;
+            }
+        }
+        return null;
+    }
+
+    private static Player? Supported(string path)
+    {
+        if (!Path.IsPathFullyQualified(path) || !File.Exists(path)) return null;
+        return Path.GetFileName(path).ToLowerInvariant() switch
+        {
+            "vlc.exe" => new Player(path, PlayerChoice.Vlc),
+            "foobar2000.exe" => new Player(path, PlayerChoice.Foobar2000),
+            "fastplay.exe" => new Player(path, PlayerChoice.FastPlay),
+            _ => null
+        };
+    }
+
+    internal static ProcessStartInfo Command(Player player, Station station, string? preparedPlaylist = null)
+    {
+        if (!PublicNetwork.TryUrl(station.Url.AbsoluteUri, null, out var address))
+            throw new InvalidDataException("The stream does not have a public HTTP or HTTPS address.");
+        var start = new ProcessStartInfo(player.Executable) { UseShellExecute = false };
+        if (player.Kind == PlayerChoice.FastPlay)
+        {
+            if (preparedPlaylist == null || !Path.IsPathFullyQualified(preparedPlaylist) ||
+                !Path.GetExtension(preparedPlaylist).Equals(".m3u8", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("A temporary playlist is required for FastPlay.");
+            start.ArgumentList.Add(preparedPlaylist);
+            return start;
+        }
+        if (player.Kind == PlayerChoice.Foobar2000) start.ArgumentList.Add("/immediate");
+        start.ArgumentList.Add(address.AbsoluteUri);
+        return start;
+    }
+
+    [DllImport("shlwapi.dll", EntryPoint = "AssocQueryStringW", CharSet = CharSet.Unicode)]
+    private static extern int AssocQueryString(uint flags, uint query, string association, string? verb,
+        StringBuilder output, ref uint characters);
+}
 
 internal static class PlaylistFile
 {
@@ -20,17 +106,26 @@ internal static class PlaylistFile
         return name;
     }
 
-    internal static string Text(Station station)
+    internal static string SuggestedName(IReadOnlyList<Station> stations) =>
+        stations.Count == 1 ? SuggestedName(stations[0].Name) : "Streams";
+
+    internal static string Text(IReadOnlyList<Station> stations)
     {
-        if (!PublicNetwork.TryUrl(station.Url.AbsoluteUri, null, out var address))
-            throw new InvalidDataException("The stream does not have a public HTTP or HTTPS address.");
-        string title = string.Concat(station.Name.Take(160).Select(c => char.IsControl(c) ? ' ' : c)).Trim();
-        return $"#EXTM3U\r\n#EXTINF:-1,{title}\r\n{address.AbsoluteUri}\r\n";
+        if (stations.Count == 0) throw new InvalidDataException("Select at least one stream.");
+        var playlist = new StringBuilder("#EXTM3U\r\n");
+        foreach (var station in stations)
+        {
+            if (!PublicNetwork.TryUrl(station.Url.AbsoluteUri, null, out var address))
+                throw new InvalidDataException("A stream does not have a public HTTP or HTTPS address.");
+            string title = string.Concat(station.Name.Take(160).Select(c => char.IsControl(c) ? ' ' : c)).Trim();
+            playlist.Append("#EXTINF:-1,").Append(title).Append("\r\n").Append(address.AbsoluteUri).Append("\r\n");
+        }
+        return playlist.ToString();
     }
 
-    internal static void Write(string path, Station station, bool replace)
+    internal static void Write(string path, IReadOnlyList<Station> stations, bool replace)
     {
-        var payload = Text(station);
+        var payload = Text(stations);
         using var file = new FileStream(path, replace ? FileMode.Create : FileMode.CreateNew, FileAccess.Write, FileShare.Read);
         try { using var writer = new StreamWriter(file, Utf8, leaveOpen: true); writer.Write(payload); }
         catch
@@ -42,14 +137,14 @@ internal static class PlaylistFile
         }
     }
 
-    internal static string SaveNew(string folder, Station station)
+    internal static string SaveNew(string folder, IReadOnlyList<Station> stations)
     {
         Directory.CreateDirectory(folder);
-        var stem = SuggestedName(station.Name);
+        var stem = SuggestedName(stations);
         for (int i = 1; i <= 100; i++)
         {
             var path = Path.Combine(folder, i == 1 ? stem + ".m3u8" : $"{stem} ({i}).m3u8");
-            try { Write(path, station, replace: false); return path; }
+            try { Write(path, stations, replace: false); return path; }
             catch (IOException) when (File.Exists(path)) { }
         }
         throw new IOException("There are too many playlists with that name in the selected folder.");
@@ -63,13 +158,13 @@ internal static class FoobarHandoff
     internal static string Folder => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), Program.Name, "FoobarHandoffs");
 
-    internal static string Stage(string folder, Station station)
+    internal static string Stage(string folder, IReadOnlyList<Station> stations)
     {
         if (Prune(folder, DateTime.UtcNow) >= MaxPending)
             throw new IOException("Too many playlists were sent recently. Try again in two minutes.");
         Directory.CreateDirectory(folder);
         var path = Path.Combine(folder, "handoff-" + Guid.NewGuid().ToString("N") + ".m3u8");
-        PlaylistFile.Write(path, station, replace: false);
+        PlaylistFile.Write(path, stations, replace: false);
         return path;
     }
 

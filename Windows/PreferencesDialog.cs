@@ -5,6 +5,9 @@ internal sealed class PreferencesDialog : Form
     private readonly TabControl tabs = new() { AccessibleName = "Preference categories", Dock = DockStyle.Fill, TabIndex = 0 };
     private readonly CheckBox sounds = new() { Text = "&Search sounds", AutoSize = true };
     private readonly CheckBox fallback = new() { Text = "&Automatically try other search methods", AutoSize = true };
+    private readonly ComboBox player = new() { AccessibleName = "Media player", DropDownStyle = ComboBoxStyle.DropDownList,
+        Anchor = AnchorStyles.Left, Width = 180 };
+    private static readonly PlayerChoice[] PlayerChoices = Enum.GetValues<PlayerChoice>();
     private readonly TextBox folder = new() { AccessibleName = "Playlist folder", Dock = DockStyle.Fill, MaxLength = 1024 };
     private readonly Button browse = new() { Text = "&Browse...", AutoSize = true };
     private readonly Button defaults = new() { Text = "Use &default folder", AutoSize = true };
@@ -28,25 +31,31 @@ internal sealed class PreferencesDialog : Form
         fallback.Checked = current.AutomaticFallback;
         updates.Checked = current.CheckUpdatesAtStartup;
         folder.Text = current.ExportFolder;
+        player.Items.AddRange(PlayerChoices.Select(StreamPreview.DisplayName).ToArray());
+        player.SelectedIndex = Array.IndexOf(PlayerChoices, current.MediaPlayer);
 
-        var general = new TableLayoutPanel { RowCount = 4, ColumnCount = 3, Dock = DockStyle.Top, AutoSize = true, Padding = new(8) };
+        var general = new TableLayoutPanel { RowCount = 5, ColumnCount = 3, Dock = DockStyle.Top, AutoSize = true, Padding = new(8) };
         general.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         general.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         general.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        var label = new Label { Text = "&Playlist folder:", AutoSize = true, Anchor = AnchorStyles.Left, TabIndex = 2 };
+        var playerLabel = new Label { Text = "&Media player:", AutoSize = true, Anchor = AnchorStyles.Left, TabIndex = 2 };
+        var label = new Label { Text = "&Playlist folder:", AutoSize = true, Anchor = AnchorStyles.Left, TabIndex = 4 };
         sounds.TabIndex = 0;
         fallback.TabIndex = 1;
-        folder.TabIndex = 3;
-        browse.TabIndex = 4;
-        defaults.TabIndex = 5;
+        player.TabIndex = 3;
+        folder.TabIndex = 5;
+        browse.TabIndex = 6;
+        defaults.TabIndex = 7;
         general.Controls.Add(sounds, 0, 0);
         general.SetColumnSpan(sounds, 3);
         general.Controls.Add(fallback, 0, 1);
         general.SetColumnSpan(fallback, 3);
-        general.Controls.Add(label, 0, 2);
-        general.Controls.Add(folder, 1, 2);
-        general.Controls.Add(browse, 2, 2);
-        general.Controls.Add(defaults, 1, 3);
+        general.Controls.Add(playerLabel, 0, 2);
+        general.Controls.Add(player, 1, 2);
+        general.Controls.Add(label, 0, 3);
+        general.Controls.Add(folder, 1, 3);
+        general.Controls.Add(browse, 2, 3);
+        general.Controls.Add(defaults, 1, 4);
         var generalTab = new TabPage("General");
         generalTab.Controls.Add(general);
         var updateTab = new TabPage("Updates") { Padding = new(8) };
@@ -86,7 +95,8 @@ internal sealed class PreferencesDialog : Form
         {
             var path = Preferences.NormalizeFolder(folder.Text);
             if (string.Equals(path, Preferences.DefaultPlaylistFolder, StringComparison.OrdinalIgnoreCase)) path = null;
-            Value = new Preferences(sounds.Checked, updates.Checked, path, fallback.Checked);
+            Value = new Preferences(sounds.Checked, updates.Checked, path, fallback.Checked,
+                player.SelectedIndex >= 0 ? PlayerChoices[player.SelectedIndex] : PlayerChoice.Automatic);
             DialogResult = DialogResult.OK;
         }
         catch (Exception e) when (e is ArgumentException or NotSupportedException or IOException)
@@ -104,11 +114,12 @@ internal sealed class PreferencesDialog : Form
         if (keyData != Keys.F1) return base.ProcessCmdKey(ref msg, keyData);
         string text = sounds.Focused ? "Play a sound when a search starts and another when it finishes." :
             fallback.Focused ? "If the chosen method finds no playable stream or cannot finish, try the other methods. This can start a temporary browser and check the public directory. Escape cancels the whole search." :
+            player.Focused ? "Choose which player opens the stream when you press Enter. Automatic prefers a supported default playlist app, then looks for VLC, Foobar2000 and FastPlay. Shift+Enter still uses the Windows default." :
             folder.Focused || browse.Focused || defaults.Focused ?
                 "Choose where Shift+Enter saves playlists. Ctrl+S starts its Save dialog in the same folder." :
             updates.Focused || tabs.SelectedIndex == 1 ?
                 "Check for a newer signed release when StreamSift opens. Updates are installed only after you choose Install update." :
-                "Set up search options, playlist files and update checks.";
+                "Set up search options, playback, playlist files and update checks.";
         using var help = new TextDialog("Preferences help", text, openManual);
         help.ShowDialog(this);
         return true;
@@ -117,7 +128,11 @@ internal sealed class PreferencesDialog : Form
     internal bool CheckControls() => tabs.TabCount == 2 && tabs.TabPages[0].Text == "General" &&
         tabs.TabPages[1].Text == "Updates" && folder.AccessibleName == "Playlist folder" &&
         fallback.Text == "&Automatically try other search methods" && fallback.Checked == Value.AutomaticFallback &&
-        !folder.AcceptsTab && sounds.TabIndex < fallback.TabIndex && fallback.TabIndex < folder.TabIndex &&
+        player.AccessibilityObject.Name == "Media player" && player.DropDownStyle == ComboBoxStyle.DropDownList &&
+        player.Items.Cast<string>().SequenceEqual(["Automatic", "VLC", "Foobar2000", "FastPlay"]) &&
+        player.SelectedItem as string == StreamPreview.DisplayName(Value.MediaPlayer) &&
+        player.Parent?.GetNextControl(player.Parent.Controls.Cast<Control>().Single(c => c.Text == "&Media player:"), true) == player &&
+        !folder.AcceptsTab && sounds.TabIndex < fallback.TabIndex && fallback.TabIndex < player.TabIndex && player.TabIndex < folder.TabIndex &&
         folder.TabIndex < browse.TabIndex && browse.TabIndex < defaults.TabIndex &&
         AcceptButton is Button { Text: "&OK" } && CancelButton is Button { Text: "&Cancel" };
 }

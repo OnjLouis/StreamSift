@@ -37,15 +37,25 @@ foreach (var resource in new[] { SearchSounds.SearchResource, SearchSounds.DoneR
 
 var prefsFolder = Path.Combine(directory, "prefs");
 Directory.CreateDirectory(prefsFolder);
-Check(Preferences.Load(prefsFolder) is { SearchSounds: true, CheckUpdatesAtStartup: false, PlaylistFolder: null, AutomaticFallback: false } defaults &&
+Check(Preferences.Load(prefsFolder) is { SearchSounds: true, CheckUpdatesAtStartup: false, PlaylistFolder: null,
+        AutomaticFallback: false, MediaPlayer: PlayerChoice.Automatic } defaults &&
     defaults.ExportFolder == Preferences.DefaultPlaylistFolder, "New install defaults.");
 File.WriteAllText(Path.Combine(prefsFolder, "SearchSounds.off"), "");
 Check(!Preferences.Load(prefsFolder).SearchSounds, "Prior muted build stays muted.");
 var exportFolder = Path.Combine(directory, "my playlists");
 File.WriteAllText(Path.Combine(prefsFolder, "Preferences.json"), """{"SearchSounds":true,"CheckUpdatesAtStartup":true}""");
-Check(Preferences.Load(prefsFolder) is { SearchSounds: true, CheckUpdatesAtStartup: true, AutomaticFallback: false },
-    "Older preferences do not opt in to automatic fallback.");
-var settings = new Preferences(true, true, exportFolder, AutomaticFallback: true);
+Check(Preferences.Load(prefsFolder) is { SearchSounds: true, CheckUpdatesAtStartup: true, AutomaticFallback: false,
+        MediaPlayer: PlayerChoice.Automatic }, "Older preferences retain Automatic playback and do not opt in to automatic search fallback.");
+string prefsFile = Path.Combine(prefsFolder, "Preferences.json");
+File.WriteAllText(prefsFile, """{"SearchSounds":false,"MediaPlayer":2}""");
+Preferences.Load(prefsFolder).Save(prefsFolder);
+using (var saved = JsonDocument.Parse(File.ReadAllBytes(prefsFile)))
+    Check(saved.RootElement.TryGetProperty("MediaPlayer", out var selectedPlayer) && selectedPlayer.GetInt32() == 2,
+        "A specific media player survives reopening and saving Preferences.");
+File.WriteAllText(prefsFile, """{"SearchSounds":false,"AutomaticFallback":true,"MediaPlayer":99}""");
+Check(Preferences.Load(prefsFolder) is { SearchSounds: false, AutomaticFallback: true, MediaPlayer: PlayerChoice.Automatic },
+    "An unknown player choice does not reset other preferences.");
+var settings = new Preferences(true, true, exportFolder, AutomaticFallback: true, MediaPlayer: PlayerChoice.Vlc);
 settings.Save(prefsFolder);
 Check(Preferences.Load(prefsFolder) == settings && !Directory.Exists(exportFolder), "Saved preferences override the old marker without creating the export folder.");
 (settings with { SearchSounds = false }).Save(prefsFolder);
@@ -62,21 +72,125 @@ foreach (var invalid in new[] { @"relative\files", @"\\.\C:\files" })
 }
 Check(Preferences.NormalizeFolder(" ") == null, "Blank playlist folder restores the default.");
 
+var historyFolder = Path.Combine(directory, "history");
+var history = SearchHistory.Load(historyFolder);
+Check(history.Length == 0 && !Directory.Exists(historyFolder), "History starts empty without creating a data folder.");
+Check(ReferenceEquals(history, SearchHistory.Remember(history, "no-stream.example", 0)), "Only successful searches are saved.");
+foreach (var input in new[] { "https://radio.example/live?token=private", "radio.example/live#private",
+    "https://user:password@radio.example/live", "https://radio.example/" + new string('a', 1024), "file:///private" })
+    Check(ReferenceEquals(history, SearchHistory.Remember(history, input, 1)), "Private and unsuitable inputs are not retained.");
+for (int i = 0; i <= SearchHistory.Capacity; i++)
+    history = SearchHistory.Remember(history, $"radio.example/{i}", 1);
+Check(history.Length == SearchHistory.Capacity && history[0] == "radio.example/10" && history[^1] == "radio.example/1",
+    "Newest search goes first and the oldest drops off the end.");
+history = SearchHistory.Remember(history, " RADIO.EXAMPLE/5 ", 2);
+Check(history[0] == "RADIO.EXAMPLE/5" && history.Length == SearchHistory.Capacity && !history.Contains("radio.example/5"),
+    "Repeating an address moves it to the front without duplicating the host.");
+Check(SearchHistory.Remember(["radio.example/A"], "radio.example/a", 1).Length == 2 &&
+    SearchHistory.Remember(["radio.example:8000"], "https://radio.example:8000", 1).Length == 2 &&
+    SearchHistory.Remember(["double tap"], "Double Tap", 1) is ["Double Tap"],
+    "Path case and explicit schemes are preserved; station names deduplicate.");
+SearchHistory.Save(historyFolder, history);
+Check(SearchHistory.Load(historyFolder).SequenceEqual(history) && !Directory.EnumerateFiles(historyFolder, "*.tmp").Any(),
+    "Recent searches persist in order without leftover staging.");
+File.WriteAllText(Path.Combine(historyFolder, "SearchHistory.json"), "[");
+Check(SearchHistory.Load(historyFolder).Length == 0, "Unreadable history does not stop the app.");
+SearchHistory.Save(historyFolder, []);
+Check(!Directory.EnumerateFiles(historyFolder).Any(), "Clearing history deletes only its file.");
+
 var audio = new Uri("https://radio.example/stream");
 var station = new Station("Lyd \u00e9 FM", audio, "MP3", 320, audio, false);
-var playlist = PlaylistFile.SaveNew(exportFolder, station);
-var secondPlaylist = PlaylistFile.SaveNew(exportFolder, station);
+var quiet = station with { Name = "Able", Format = "AAC", Bitrate = 48, Listeners = 0, Url = new Uri("https://radio.example/quiet") };
+var unknownRate = station with { Name = "Local", Bitrate = null };
+Station[] mixed = [unknownRate, station, quiet];
+Check(ResultView.Formats(mixed).SequenceEqual(["AAC", "MP3"]) &&
+    ResultView.Formats([quiet]).SequenceEqual(["AAC"]), "Format choices come only from the current search.");
+Check(new ResultView("AAC").Apply(mixed).SequenceEqual([quiet]) &&
+    new ResultView("FLAC").Apply(mixed).Length == 0 &&
+    default(ResultView).Apply(mixed).SequenceEqual(mixed), "Filtering is non-destructive and the default restores the search order.");
+Check(new ResultView(Order: ResultOrder.BitrateDescending).Apply(mixed).SequenceEqual([station, quiet, unknownRate]) &&
+    new ResultView(Order: ResultOrder.BitrateAscending).Apply(mixed).SequenceEqual([quiet, station, unknownRate]) &&
+    new ResultView(Order: ResultOrder.NameAscending).Apply(mixed).SequenceEqual([quiet, unknownRate, station]),
+    "Sort by name and bitrate, with unknown bitrates consistently last.");
+Check(ResultView.Find(mixed, -1, "LYD E", false) == 1 && ResultView.Find(mixed, 1, "mp3", false) == 0 &&
+    ResultView.Find(mixed, 0, "mp3", true) == 1 && ResultView.Find(mixed, -1, "48 kbps", false) == 2 &&
+    ResultView.Find([quiet], -1, "mp3", false) == -1 && ResultView.Find([quiet], -1, "/quiet", false) == 0,
+    "Find wraps in both directions and matches only visible names, codecs, bitrate and addresses.");
+Station[] counted = [station, quiet, unknownRate with { Listeners = 12 }];
+Check(new ResultView(Order: ResultOrder.ListenersDescending).Apply(counted).Select(s => s.Listeners).SequenceEqual([12, 0, null]) &&
+    new ResultView(Order: ResultOrder.ListenersAscending).Apply(counted).Select(s => s.Listeners).SequenceEqual([0, 12, null]) &&
+    ResultView.Find(counted, -1, "0 listeners", false) == 1, "Reported zero is distinct from an unknown listener count.");
+var refreshView = new ResultView("AAC", ResultOrder.ListenersDescending);
+Check(refreshView.RetainAvailable(counted) == refreshView &&
+    refreshView.RetainAvailable([station]) == default &&
+    new ResultView("AAC", ResultOrder.BitrateDescending).RetainAvailable([station]) == new ResultView(Order: ResultOrder.BitrateDescending),
+    "Refresh retains available filter and sort choices, without hiding replacement formats.");
+var playlist = PlaylistFile.SaveNew(exportFolder, [station]);
+var secondPlaylist = PlaylistFile.SaveNew(exportFolder, [station]);
 var expectedPlaylist = "#EXTM3U\r\n#EXTINF:-1,Lyd \u00e9 FM\r\nhttps://radio.example/stream\r\n";
 Check(Path.GetFileName(playlist) == "Lyd \u00e9 FM.m3u8" && Path.GetFileName(secondPlaylist) == "Lyd \u00e9 FM (2).m3u8" &&
     File.ReadAllBytes(playlist).SequenceEqual(Encoding.UTF8.GetBytes(expectedPlaylist)), "Default-player exports are UTF-8 and never overwrite.");
 Check(PlaylistFile.SuggestedName("CON") == "_CON" &&
-    PlaylistFile.Text(station with { Name = "Name\r\n#EXTINF" }).Split("\r\n").Length == 4, "Reserved names and extra playlist lines are blocked.");
-Reject(() => PlaylistFile.Text(station with { Url = new Uri("file:///C:/not-a-stream") }), "A local path was accepted as a stream.");
+    PlaylistFile.Text([station with { Name = "Name\r\n#EXTINF" }]).Split("\r\n").Length == 4, "Reserved names and extra playlist lines are blocked.");
+var invalidStation = station with { Url = new Uri("file:///C:/not-a-stream") };
+Reject(() => PlaylistFile.Write(playlist, [station, invalidStation], replace: true), "A local path was accepted as a stream.");
+Check(File.ReadAllText(playlist) == expectedPlaylist, "A rejected batch does not truncate an existing playlist.");
+Reject(() => PlaylistFile.Text([]), "An empty selection was accepted.");
+
+var batch = Enumerable.Range(1, 288).Select(i => station with {
+    Name = $"Station {i}", Url = new Uri($"https://radio.example/{i}")
+}).ToArray();
+var batchFolder = Path.Combine(directory, "batch");
+var batchFile = PlaylistFile.SaveNew(batchFolder, batch);
+var batchLines = File.ReadAllLines(batchFile);
+Check(Directory.GetFiles(batchFolder) is [var only] && only == batchFile &&
+    Path.GetFileName(batchFile) == "Streams.m3u8" && batchLines[0] == "#EXTM3U" &&
+    batchLines.Skip(1).SequenceEqual(batch.SelectMany(s => new[] { "#EXTINF:-1," + s.Name, s.Url.AbsoluteUri })),
+    "One playlist exports all 288 selected streams in order.");
 
 var incoming = Path.Combine(directory, "incoming");
-var handoff = FoobarHandoff.Stage(incoming, station);
-var freshHandoff = FoobarHandoff.Stage(incoming, station);
+var handoff = FoobarHandoff.Stage(incoming, [station]);
+var freshHandoff = FoobarHandoff.Stage(incoming, batch);
+Check(File.ReadAllLines(freshHandoff).SequenceEqual(batchLines), "Foobar receives the full selected set in one playlist.");
 var command = FoobarHandoff.Command(@"C:\Program Files\foobar2000\foobar2000.exe", handoff);
+var playerRoot = Path.Combine(directory, "players");
+var vlcPath = Path.Combine(playerRoot, "VideoLAN", "VLC", "vlc.exe");
+var foobarPath = Path.Combine(playerRoot, "foobar2000", "foobar2000.exe");
+var fastPlayPath = Path.Combine(playerRoot, "FastPlay", "FastPlay.exe");
+var portableFoobar = Path.Combine(directory, "portable", "foobar2000.exe");
+var otherPlayer = Path.Combine(playerRoot, "wmplayer.exe");
+foreach (var exe in new[] { vlcPath, foobarPath, fastPlayPath, portableFoobar, otherPlayer })
+{
+    Directory.CreateDirectory(Path.GetDirectoryName(exe)!);
+    File.WriteAllText(exe, "");
+}
+Check(StreamPreview.ResolvePlayer(PlayerChoice.Automatic, portableFoobar, [playerRoot]) is { Executable: var preferred } &&
+    preferred == portableFoobar, "Automatic prefers a supported default, including portable players.");
+Check(StreamPreview.ResolvePlayer(PlayerChoice.Automatic, otherPlayer, [playerRoot]) is { Kind: PlayerChoice.Vlc },
+    "Automatic ignores unsupported defaults and prefers installed VLC.");
+Check(StreamPreview.ResolvePlayer(PlayerChoice.Vlc, portableFoobar, [playerRoot]) is { Executable: var chosenVlc } && chosenVlc == vlcPath,
+    "Explicit VLC ignores the Foobar2000 association.");
+Check(StreamPreview.ResolvePlayer(PlayerChoice.Foobar2000, vlcPath, [playerRoot]) is { Executable: var chosenFoobar } &&
+    chosenFoobar == foobarPath, "Explicit Foobar2000 ignores the VLC association.");
+Check(StreamPreview.ResolvePlayer(PlayerChoice.Foobar2000, portableFoobar, [])?.Executable == portableFoobar,
+    "Explicit Foobar2000 can use a matching portable default.");
+Check(StreamPreview.ResolvePlayer(PlayerChoice.Automatic, fastPlayPath, [playerRoot])?.Kind == PlayerChoice.FastPlay &&
+    StreamPreview.ResolvePlayer(PlayerChoice.FastPlay, portableFoobar, [playerRoot])?.Executable == fastPlayPath,
+    "Automatic honors a FastPlay association and an explicit choice uses its installed copy.");
+var fastPlay = new StreamPreview.Player(fastPlayPath, PlayerChoice.FastPlay);
+Reject(() => StreamPreview.Command(fastPlay, station), "FastPlay was given a raw URL.");
+Check(StreamPreview.Command(fastPlay, station, handoff).ArgumentList.SequenceEqual([handoff]),
+    "FastPlay opens only the one-stream temporary playlist.");
+File.Delete(vlcPath);
+Check(StreamPreview.ResolvePlayer(PlayerChoice.Vlc, portableFoobar, [playerRoot]) == null &&
+    StreamPreview.ResolvePlayer(PlayerChoice.Automatic, vlcPath, [playerRoot])?.Executable == foobarPath,
+    "A missing explicit player does not fall back, but Automatic does.");
+var preview = StreamPreview.Command(new StreamPreview.Player(vlcPath, PlayerChoice.Vlc), station);
+Check(!preview.UseShellExecute && preview.ArgumentList.SequenceEqual([station.Url.AbsoluteUri]),
+    "Preview sends exactly the raw stream argument to the player without creating a playlist.");
+var directFoobar = StreamPreview.Command(new StreamPreview.Player(foobarPath, PlayerChoice.Foobar2000), station);
+Check(directFoobar.ArgumentList.SequenceEqual(["/immediate", station.Url.AbsoluteUri]),
+    "Foobar preview uses regular open, without an add or play-existing command.");
 Check(command.ArgumentList.SequenceEqual(new[] { "/add", handoff }) && !command.UseShellExecute &&
     File.ReadAllText(handoff) == expectedPlaylist, "Foobar2000 receives a local one-stream playlist without playback or playlist selection switches.");
 var unrelatedPlaylist = Path.Combine(incoming, "handoff-important.m3u8");

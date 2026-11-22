@@ -37,11 +37,14 @@ internal static partial class Extraction
     private const string TritonProvisioning = "/api/livestream";
     private const string TritonRedirect = "/api/livestream-redirect/";
     private static readonly XNamespace TritonSchema = "http://provisioning.streamtheworld.com/player/livestream-1.9";
-    internal sealed record Extracted(bool LiveHls, bool IsDirectory, List<Link> Links);
+    internal sealed record Extracted(bool LiveHls, bool IsDirectory, List<Link> Links, ServerListing? Server);
 
-    internal static Uri? OfficialCatalogue(Uri page) =>
-        page.IsDefaultPort && IsSwedishRadioSite(page) && page.AbsolutePath.TrimEnd('/') is "" or "/kanaler"
+    internal static Uri? OfficialCatalogue(Uri page)
+    {
+        if (ServerListings.IsSoundmap(page)) return ServerListings.Soundmap;
+        return page.IsDefaultPort && IsSwedishRadioSite(page) && page.AbsolutePath.TrimEnd('/') is "" or "/kanaler"
             ? SwedishRadioChannels : null;
+    }
 
     internal static Link? PublicPlayerSource(Uri page)
     {
@@ -60,9 +63,12 @@ internal static partial class Extraction
         var trim = text.TrimStart('\uFEFF', ' ', '\r', '\n', '\t');
         bool hls = false;
         bool directory = false;
+        ServerListing? server = null;
         try
         {
-            if (page == SwedishRadioChannels)
+            if (ServerListings.IsJsonListing(page))
+                server = ServerListings.FromJson(trim, page, token);
+            else if (page == SwedishRadioChannels)
                 SwedishRadio(trim);
             else if (page.Scheme == "https" && page.IsDefaultPort && page.IdnHost == TritonHost &&
                      page.AbsolutePath == TritonProvisioning)
@@ -80,16 +86,16 @@ internal static partial class Extraction
                 Html(trim);
         }
         catch (Exception e) when (e is RegexMatchTimeoutException or XmlException or JsonException) { }
-        return new(hls, directory, links);
+        return new(hls, directory, links, server);
 
         void Add(string? value, LinkKind kind, string? name = null, bool hint = false, Uri? relative = null,
-            NameOrigin nameOrigin = NameOrigin.Inferred, Uri? wrapper = null, bool keepAddress = false)
+            NameOrigin nameOrigin = NameOrigin.Inferred, Uri? wrapper = null, bool keepAddress = false, int? listeners = null)
         {
             token.ThrowIfCancellationRequested();
             if (value == null || links.Count >= MaxPageLinks || value.TrimStart().StartsWith('#') ||
                 !PublicNetwork.TryUrl(WebUtility.HtmlDecode(value), relative ?? page, out var uri) ||
                 uri == page || !seen.Add(uri.AbsoluteUri)) return;
-            links.Add(new Link(uri, page, kind, name, hint, nameOrigin, wrapper, keepAddress));
+            links.Add(new Link(uri, page, kind, name, hint, nameOrigin, wrapper, keepAddress, listeners));
         }
 
         void Candidate(string raw, string? name, bool explicitAudio = false, Uri? relative = null)
@@ -130,6 +136,13 @@ internal static partial class Extraction
             var document = new HtmlParser().ParseDocument(body);
             var title = Label(document.Title) ?? source.Name;
             int appEntryScripts = 0;
+            if (source.Kind == LinkKind.Player && ServerListings.IsStatusPage(page))
+            {
+                server = ServerListings.FromHtml(document, page, token);
+                if (server != null) return;
+                if (ServerListings.LinkedIcecastStatus(document, page) is Uri status)
+                    Add(status.AbsoluteUri, LinkKind.ServerStatus);
+            }
             if (SecureNetCallSign(page) is string callSign)
             {
                 foreach (var script in document.Scripts.Where(s => !s.HasAttribute("src")))
@@ -205,17 +218,18 @@ internal static partial class Extraction
                     .FirstOrDefault(link => link != null && SameOrigin(page, link) && link.AbsolutePath == direct.AbsolutePath + ".m3u");
                 if (wrapper == null) continue;
                 string? name = null;
+                int? listeners = null;
                 foreach (var row in card!.QuerySelectorAll("tr"))
                 {
                     var cells = row.QuerySelectorAll("td");
-                    if (cells.Length >= 2 && cells[0].TextContent.Trim().Equals("Stream Name:", StringComparison.OrdinalIgnoreCase))
-                    {
-                        name = StationName(cells[1].TextContent);
-                        break;
-                    }
+                    if (cells.Length < 2) continue;
+                    string field = cells[0].TextContent.Trim();
+                    if (field.Equals("Stream Name:", StringComparison.OrdinalIgnoreCase)) name = StationName(cells[1].TextContent);
+                    listeners ??= ServerListings.HtmlListeners(field, cells[1].TextContent);
                 }
                 var mountName = Uri.UnescapeDataString(direct.AbsolutePath.Trim('/'));
-                Add(direct.AbsoluteUri, LinkKind.Audio, name ?? Label(mountName), true, nameOrigin: NameOrigin.Directory, wrapper: wrapper);
+                Add(direct.AbsoluteUri, LinkKind.Audio, name ?? Label(mountName), true, nameOrigin: NameOrigin.Directory,
+                    wrapper: wrapper, listeners: listeners);
                 directory = true;
             }
             if (directory)

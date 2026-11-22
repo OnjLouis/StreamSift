@@ -2,25 +2,31 @@ import AppKit
 import Darwin
 import UniformTypeIdentifiers
 
-@MainActor final class StreamSiftApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextFieldDelegate,
+@MainActor final class StreamSiftApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSComboBoxDelegate,
                                      NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation {
     private let projectURL = URL(string: "https://github.com/OnjLouis/StreamSift")!
     private let window = KeyboardWindow(contentRect: NSRect(x: 0, y: 0, width: 730, height: 505),
                                         styleMask: [.titled, .closable, .miniaturizable, .resizable],
                                         backing: .buffered, defer: false)
-    private let address = NSTextField()
+    private let address = NSComboBox()
     private let find = NSButton(title: "Find Streams", target: nil, action: nil)
     private let findBrowser = NSButton(title: "Find with Browser", target: nil, action: nil)
     private let cancel = NSButton(title: "Cancel", target: nil, action: nil)
     private let table = StreamTable()
-    private let details = readOnlyText("Stream details", hint: "Review the stream address and where it was found.")
+    private let details = readOnlyText("Stream details", hint: "Review the first selected stream. Command+2 returns to Streams.")
     private let status = readOnlyText("Status", hint: "Read the latest search or action result.")
     private let defaults = UserDefaults.standard
+    private lazy var history = SearchHistory(reading: defaults)
+    private var historyOpen = false
     private var settings: PreferencesWindow?
     private var preferences = Preferences()
     private var startSound: NSSound?
     private var doneSound: NSSound?
     private var stations: [Station] = []
+    private var allStations: [Station] = []
+    private var resultView = ResultView()
+    private var resultQuery = ""
+    private var lastSearch: (input: String, mode: SearchMode)?
     private var names: [String] = []
     private var job: ScanJob?
     private var isCancelling = false
@@ -29,6 +35,7 @@ import UniformTypeIdentifiers
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         preferences = Preferences(reading: defaults)
+        _ = try? PlaybackHandoff.prune()
         startSound = sound(named: "search")
         doneSound = sound(named: "done")
         buildMenus()
@@ -58,6 +65,11 @@ import UniformTypeIdentifiers
         window.help = { [weak self] in self?.focusedHelp() }
         window.updates = { [weak self] in self?.checkUpdates() }
         window.project = { [weak self] in self?.openProject() }
+        window.findResult = { [weak self] backwards in
+            guard let self, job == nil, !stations.isEmpty, window.attachedSheet == nil else { return false }
+            findResult(backwards: backwards)
+            return true
+        }
         window.keyOrder = { [weak self] in self?.mainKeyOrder ?? [] }
         window.cancel = { [weak self] in
             guard self?.job != nil else { return false }
@@ -70,9 +82,12 @@ import UniformTypeIdentifiers
         address.target = self
         address.action = #selector(findStreams)
         address.delegate = self
+        address.numberOfVisibleItems = SearchHistory.capacity
+        address.completes = false
+        refreshHistory()
         address.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         label("Website address or station name", for: address,
-              hint: "Enter a public website, stream address, station name or call sign.")
+              hint: "Enter a public website, stream address, station name or call sign, or choose a recent successful search from the list.")
         find.target = self
         find.action = #selector(findStreams)
         findBrowser.target = self
@@ -87,9 +102,9 @@ import UniformTypeIdentifiers
         let searchButtons = NSStackView(views: [find, findBrowser, cancel])
         searchButtons.alignment = .centerY
 
-        label("Streams", for: table, hint: "Move through streams with the arrow keys. Return opens actions. Shift+Return opens the selected stream in your player.")
+        label("Streams", for: table, hint: "Command+A selects all visible streams, and Command+S saves the selection in one playlist. Return plays one selected stream. Command+3 moves to Stream Details.")
         table.usesAlternatingRowBackgroundColors = true
-        table.allowsMultipleSelection = false
+        table.allowsMultipleSelection = true
         table.allowsEmptySelection = false
         table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
         let streamColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("Stream"))
@@ -99,9 +114,16 @@ import UniformTypeIdentifiers
         streamColumn.resizingMask = [.autoresizingMask, .userResizingMask]
         table.addTableColumn(streamColumn)
         table.target = self
-        table.doubleAction = #selector(openDefaultPlayer)
+        table.doubleAction = #selector(previewStream)
         table.copyAddress = { [weak self] in self?.copyAddress() }
         table.openPlayer = { [weak self] in self?.openDefaultPlayer() }
+        table.previewStream = { [weak self] in self?.previewStream() }
+        table.openBrowser = { [weak self] in self?.openStreamInBrowser() }
+        table.didSelectAll = { [weak self] in
+            guard let self else { return }
+            let count = table.selectedRowIndexes.count
+            setStatus(count == 1 ? "1 stream selected." : "\(count) streams selected.")
+        }
         table.actionMenu = { [weak self] in self?.resultMenu() }
         table.dataSource = self
         table.delegate = self
@@ -158,6 +180,7 @@ import UniformTypeIdentifiers
             item("New Search", #selector(reset), "n"),
             item("Save Playlist...", #selector(savePlaylist), "s"),
             item("Open Playlist Folder", #selector(openPlaylistFolder), "o", modifiers: [.command, .shift]),
+            item("Clear Search History", #selector(clearHistory)),
             .separator(),
             NSMenuItem(title: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         ])
@@ -173,8 +196,18 @@ import UniformTypeIdentifiers
             item("Find Streams", #selector(findStreams), "\r"),
             item("Find with Browser", #selector(findWithBrowser), "\r", modifiers: [.command, .shift]),
             item("Look Up in Public Directory", #selector(findInDirectory), "d", modifiers: [.command, .shift]),
-            item("Copy Stream Address", #selector(copyAddress)),
-            item("Open in Default Player", #selector(openDefaultPlayer))
+            item("Refresh Results", #selector(refreshResults), "r"), .separator(),
+            item("Copy Stream Addresses", #selector(copyAddress)),
+            item("Play Stream", #selector(previewStream)),
+            item("Open Stream in Browser", #selector(openStreamInBrowser), "\r", modifiers: .option),
+            item("Save and Open in Default Player", #selector(openDefaultPlayer)), .separator(),
+            item("Go to Address", #selector(focusAddress), "1"),
+            item("Go to Streams", #selector(focusStreams), "2"),
+            item("Go to Stream Details", #selector(focusDetails), "3"), .separator(),
+            item("Filter and Sort...", #selector(showResultFilter), "l"),
+            item("Find in Results...", #selector(showResultFind), "f"),
+            item("Find Next", #selector(findNextResult), "g"),
+            item("Find Previous", #selector(findPreviousResult), "g", modifiers: [.command, .shift])
         ])
         NSApp.windowsMenu = section("Window", [
             NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"),
@@ -189,14 +222,38 @@ import UniformTypeIdentifiers
         NSApp.mainMenu = main
     }
 
-    private var selected: Station? { stations.indices.contains(table.selectedRow) ? stations[table.selectedRow] : nil }
+    private var selectedStations: [Station] {
+        table.selectedRowIndexes.compactMap { stations.indices.contains($0) ? stations[$0] : nil }
+    }
+    private var selected: Station? {
+        guard let row = table.selectedRowIndexes.first, stations.indices.contains(row) else { return nil }
+        return stations[row]
+    }
+
+    @objc private func focusAddress() { if job == nil { window.makeFirstResponder(address) } }
+    @objc private func focusStreams() { if !stations.isEmpty { window.makeFirstResponder(table) } }
+    @objc private func focusDetails() { if selected != nil { window.makeFirstResponder(details) } }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
-        case #selector(savePlaylist), #selector(copyAddress), #selector(openDefaultPlayer):
+        case #selector(savePlaylist), #selector(copyAddress), #selector(openDefaultPlayer), #selector(focusDetails):
             return selected != nil && window.isKeyWindow && window.attachedSheet == nil
+        case #selector(previewStream), #selector(openStreamInBrowser):
+            return table.selectedRowIndexes.count == 1 && window.isKeyWindow && window.attachedSheet == nil
+        case #selector(focusAddress):
+            return job == nil && window.isKeyWindow && window.attachedSheet == nil
+        case #selector(focusStreams):
+            return !stations.isEmpty && window.isKeyWindow && window.attachedSheet == nil
+        case #selector(showResultFilter):
+            return job == nil && !allStations.isEmpty && window.isKeyWindow && window.attachedSheet == nil
+        case #selector(showResultFind), #selector(findNextResult), #selector(findPreviousResult):
+            return job == nil && !stations.isEmpty && window.isKeyWindow && window.attachedSheet == nil
+        case #selector(refreshResults):
+            return job == nil && lastSearch != nil && !historyOpen && window.isKeyWindow && window.attachedSheet == nil
         case #selector(openPlaylistFolder):
             return window.isKeyWindow && window.attachedSheet == nil
+        case #selector(clearHistory):
+            return job == nil && !history.entries.isEmpty && window.isKeyWindow && window.attachedSheet == nil
         case #selector(reset), #selector(findStreams), #selector(findWithBrowser), #selector(findInDirectory):
             return job == nil && window.isKeyWindow && window.attachedSheet == nil
         case #selector(checkUpdates): return !checkingUpdate
@@ -206,11 +263,15 @@ import UniformTypeIdentifiers
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if commandSelector == #selector(NSResponder.insertNewline(_:)), control === address {
+            if historyOpen { return false }
             findStreams()
             return true
         }
         return false
     }
+
+    func comboBoxWillPopUp(_ notification: Notification) { historyOpen = true }
+    func comboBoxWillDismiss(_ notification: Notification) { historyOpen = false }
 
     func numberOfRows(in tableView: NSTableView) -> Int { stations.count }
 
@@ -228,6 +289,9 @@ import UniformTypeIdentifiers
             details.string = [selected.name, "Format: " + selected.format,
                               selected.bitrate.map { "Bitrate: \($0) kbps" } ?? "Bitrate: not reported",
                               "Stream address:", selected.url, "Found on:", selected.foundOn].joined(separator: "\n")
+            if let listeners = selected.listeners { details.string += "\nListeners at scan: \(listeners)" }
+            let count = table.selectedRowIndexes.count
+            if count > 1 { details.string = "\(count) streams selected. Details for the first stream:\n\n" + details.string }
         } else {
             details.string = ""
         }
@@ -239,7 +303,7 @@ import UniformTypeIdentifiers
         table.hasStreams = !stations.isEmpty
         table.setAccessibilityElement(table.hasStreams)
         details.setAccessibilityElement(selected != nil)
-        address.isEditable = job == nil
+        address.isEnabled = job == nil
         find.isEnabled = job == nil
         findBrowser.isEnabled = job == nil
         cancel.isEnabled = job != nil
@@ -248,11 +312,19 @@ import UniformTypeIdentifiers
     }
 
     private var mainKeyOrder: [NSView] {
-        [address] + (job == nil ? [find, findBrowser] : [cancel]) + (stations.isEmpty ? [] : [table]) +
+        (job == nil ? [address, find, findBrowser] as [NSView] : [cancel]) + (stations.isEmpty ? [] : [table]) +
             (selected == nil ? [] : [details]) + [status]
     }
 
     private func load(_ found: [Station]) {
+        allStations = found
+        resultView = ResultView()
+        resultQuery = ""
+        render(found, preserving: [])
+    }
+
+    private func render(_ found: [Station], preserving selection: Set<String>) {
+        guard stations != found else { refreshNavigation(); return }
         stations = found
         func group(_ row: Station) -> [String] { [row.name, row.format, String(row.bitrate ?? -1)] }
         let counts = Dictionary(grouping: found, by: group)
@@ -261,8 +333,72 @@ import UniformTypeIdentifiers
             return "\(row.name) (\(url.host ?? "")\(url.path))"
         }
         table.reloadData()
-        if !found.isEmpty { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }
+        if !found.isEmpty {
+            let kept = IndexSet(found.indices.filter { selection.contains(found[$0].url) })
+            table.selectRowIndexes(kept.isEmpty ? IndexSet(integer: 0) : kept, byExtendingSelection: false)
+            table.scrollRowToVisible(kept.first ?? 0)
+        }
         tableViewSelectionDidChange(Notification(name: NSTableView.selectionDidChangeNotification))
+    }
+
+    @objc private func showResultFilter() {
+        guard !allStations.isEmpty, window.attachedSheet == nil else { return }
+        let formats = ResultView.formats(allStations)
+        let format = NSPopUpButton()
+        format.addItems(withTitles: ["All formats"] + formats)
+        format.selectItem(at: resultView.format.flatMap { formats.firstIndex(of: $0) }.map { $0 + 1 } ?? 0)
+        let sort = NSPopUpButton()
+        let orders = allStations.contains { $0.listeners != nil } ? ResultOrder.allCases :
+            ResultOrder.allCases.filter { $0 != .listenersDescending && $0 != .listenersAscending }
+        sort.addItems(withTitles: orders.map(\.label))
+        sort.selectItem(at: resultView.order.rawValue)
+        let sheet = ResultCommandSheet(title: "Filter and Sort", action: "Apply", fields: [
+            ("Format", format, "Show all formats or a format found in the current search."),
+            ("Sort by", sort, "Choose search order, station name, bitrate or listeners where reported. Unknown counts and bitrates appear last.")
+        ], manual: { [weak self] in self?.openManual() })
+        sheet.present(on: window) { [weak self] in
+            guard let self else { return }
+            let index = format.indexOfSelectedItem - 1
+            resultView = ResultView(format: formats.indices.contains(index) ? formats[index] : nil,
+                                    order: ResultOrder(rawValue: sort.indexOfSelectedItem) ?? .search)
+            render(resultView.apply(allStations), preserving: Set(selectedStations.map(\.url)))
+            setStatus("Showing \(stations.count) of \(allStations.count) streams.")
+            window.makeFirstResponder(table)
+        }
+    }
+
+    @objc private func showResultFind() { promptFind(backwards: false) }
+    @objc private func findNextResult() { findResult(backwards: false) }
+    @objc private func findPreviousResult() { findResult(backwards: true) }
+
+    private func promptFind(backwards: Bool) {
+        guard !stations.isEmpty, window.attachedSheet == nil else { return }
+        let input = NSTextField(string: resultQuery)
+        let sheet = ResultCommandSheet(title: "Find in Results", action: "Find", fields: [
+            ("Find what", input, "Find text in the visible streams by name, format, bitrate, listeners or address.")
+        ], manual: { [weak self] in self?.openManual() })
+        sheet.present(on: window) { [weak self] in
+            guard let self else { return }
+            let text = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return }
+            resultQuery = String(text.prefix(256))
+            findResult(backwards: backwards, fromStart: true)
+        }
+    }
+
+    private func findResult(backwards: Bool, fromStart: Bool = false) {
+        guard !stations.isEmpty else { return }
+        if resultQuery.isEmpty { promptFind(backwards: backwards); return }
+        let anchor = fromStart ? -1 : table.selectedRow
+        guard let index = ResultView.find(in: stations, after: anchor,
+                                          query: resultQuery, backwards: backwards) else {
+            setStatus("No match in the visible streams.")
+            return
+        }
+        table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        table.scrollRowToVisible(index)
+        window.makeFirstResponder(table)
+        if index == anchor { setStatus("Only one match in the visible streams.") }
     }
 
     private func setStatus(_ message: String) {
@@ -275,26 +411,35 @@ import UniformTypeIdentifiers
         }
     }
 
-    @objc private func findStreams() { startSearch(mode: .passive) }
+    @objc private func findStreams() { if !historyOpen { startSearch(mode: .passive) } }
 
     @objc private func findWithBrowser() { startSearch(mode: .browser) }
 
     @objc private func findInDirectory() { startSearch(mode: .directory) }
 
-    private func startSearch(mode: SearchMode) {
+    @objc private func refreshResults() {
+        guard let lastSearch, !historyOpen else { return }
+        startSearch(mode: lastSearch.mode, refreshInput: lastSearch.input)
+    }
+
+    private func startSearch(mode: SearchMode, refreshInput: String? = nil) {
         guard job == nil else { return }
-        let input = address.currentEditor()?.string ?? address.stringValue
+        let refreshing = refreshInput != nil
+        let input = refreshInput ?? address.currentEditor()?.string ?? address.stringValue
         let running = ScanJob()
         do {
             try running.start(input, mode: mode, fallback: preferences.automaticFallback, onFallback: { [weak self, weak running] next in
                 guard let self, job === running, !isCancelling else { return }
                 setStatus("Trying another method. " + next.starting)
-            }) { [weak self] result in self?.finished(result, mode: mode) }
+            }) { [weak self] result in self?.finished(result, mode: mode, input: input, refreshing: refreshing) }
             isCancelling = false
             job = running
-            load([])
+            lastSearch = (input, mode)
+            if !refreshing { load([]) }
+            refreshNavigation()
             window.makeFirstResponder(cancel)
-            setStatus(mode.starting)
+            if refreshing { address.stringValue = input }
+            setStatus(refreshing ? "Refreshing results..." : mode.starting)
             if preferences.sounds { startSound?.stop(); startSound?.play() }
         } catch {
             setStatus(error.localizedDescription)
@@ -308,22 +453,36 @@ import UniformTypeIdentifiers
         job.cancel()
     }
 
-    private func finished(_ result: Result<SearchResult, Error>, mode: SearchMode) {
+    private func finished(_ result: Result<SearchResult, Error>, mode: SearchMode, input: String, refreshing: Bool) {
         let focused = window.focusedView
         let moveFocus = focused === cancel || focused === address || focused === find || focused === findBrowser
         job = nil
-        let message: String
+        var message: String
         if isCancelling {
-            message = "Search cancelled."
+            message = refreshing && !stations.isEmpty ? "Refresh cancelled. Previous results kept." : "Search cancelled."
         } else {
             switch result {
             case .success(let found):
-                load(found.stations)
+                if history.remember(input, verifiedStreams: found.stations.count, in: defaults) { refreshHistory() }
+                let previousFormat = resultView.format
+                if refreshing {
+                    allStations = found.stations
+                    resultView = resultView.retainingAvailable(in: allStations)
+                    render(resultView.apply(allStations), preserving: Set(selectedStations.map(\.url)))
+                } else {
+                    load(found.stations)
+                }
                 let prefix = found.stations.isEmpty && (found.attempts ?? 0) > 1 ? "Automatic search: " : (found.method ?? mode).resultPrefix
-                message = prefix + found.summary
+                message = (refreshing ? "Refresh finished. " : "") + prefix + found.summary
+                if refreshing, let format = resultView.format {
+                    message += " Showing \(stations.count) \(format) streams."
+                } else if refreshing, let previousFormat, !allStations.isEmpty {
+                    message += " \(previousFormat) is no longer available. Showing all formats."
+                }
                 if preferences.sounds { doneSound?.stop(); doneSound?.play() }
             case .failure(let error):
-                message = (error as? StreamError)?.errorDescription ?? StreamError.search.errorDescription ?? "Search failed."
+                message = refreshing && !stations.isEmpty ? "Refresh could not finish. Previous results kept." :
+                    ((error as? StreamError)?.errorDescription ?? StreamError.search.errorDescription ?? "Search failed.")
             }
         }
         refreshNavigation()
@@ -333,8 +492,24 @@ import UniformTypeIdentifiers
         if moveFocus { window.makeFirstResponder(stations.isEmpty ? status : table) }
     }
 
+    private func refreshHistory() {
+        let input = address.stringValue
+        address.removeAllItems()
+        address.addItems(withObjectValues: history.entries)
+        address.stringValue = input
+    }
+
+    @objc private func clearHistory() {
+        guard job == nil else { return }
+        history.clear(in: defaults)
+        refreshHistory()
+        setStatus("Search history cleared.")
+    }
+
     @objc private func reset() {
         guard job == nil else { return }
+        lastSearch = nil
+        if address.indexOfSelectedItem >= 0 { address.deselectItem(at: address.indexOfSelectedItem) }
         address.stringValue = ""
         load([])
         setStatus("Ready.")
@@ -343,33 +518,39 @@ import UniformTypeIdentifiers
 
     private func resultMenu() -> NSMenu {
         let menu = NSMenu()
-        menu.addItem(item("Copy Stream Address", #selector(copyAddress), "c"))
+        menu.addItem(item("Play Stream", #selector(previewStream), "\r", modifiers: []))
+        menu.addItem(item("Open Stream in Browser", #selector(openStreamInBrowser), "\r", modifiers: .option))
+        menu.addItem(item(table.selectedRowIndexes.count == 1 ? "Copy Stream Address" : "Copy Stream Addresses", #selector(copyAddress), "c"))
         menu.addItem(item("Save Playlist...", #selector(savePlaylist), "s"))
-        menu.addItem(item("Open in Default Player", #selector(openDefaultPlayer), "\r", modifiers: .shift))
+        menu.addItem(item("Save and Open in Default Player", #selector(openDefaultPlayer), "\r", modifiers: .shift))
         return menu
     }
 
     @objc private func copyAddress() {
-        guard let selected else { return }
+        let selection = selectedStations
+        guard !selection.isEmpty else { return }
         NSPasteboard.general.clearContents()
-        if NSPasteboard.general.setString(selected.url, forType: .string) { setStatus("Stream address copied.") }
+        if NSPasteboard.general.setString(selection.map(\.url).joined(separator: "\n"), forType: .string) {
+            setStatus(selection.count == 1 ? "Stream address copied." : "\(selection.count) stream addresses copied.")
+        }
         else { showMessage("Copy Could Not Finish", "The clipboard is unavailable. Try again.") }
     }
 
     @objc private func savePlaylist() {
-        guard let selected, window.attachedSheet == nil else { return }
+        let selection = selectedStations
+        guard !selection.isEmpty, window.attachedSheet == nil else { return }
         do { try FileManager.default.createDirectory(at: preferences.folder, withIntermediateDirectories: true) }
         catch { showMessage("Could Not Open Playlist Folder", error.localizedDescription); return }
         let save = NSSavePanel()
         save.title = "Save Stream Playlist"
         save.directoryURL = preferences.folder
         save.allowedContentTypes = [UTType(filenameExtension: "m3u8") ?? .data]
-        save.nameFieldStringValue = Playlist.stem(selected.name) + ".m3u8"
+        save.nameFieldStringValue = Playlist.stem(selection) + ".m3u8"
         save.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let file = save.url else { return }
             do {
-                try Playlist.data(selected).write(to: file, options: .atomic)
-                self?.setStatus("Playlist saved: \(file.lastPathComponent)")
+                try Playlist.data(selection).write(to: file, options: .atomic)
+                self?.reportSaved(file, count: selection.count)
             } catch { self?.showMessage("Playlist Could Not Be Saved", error.localizedDescription) }
         }
     }
@@ -384,15 +565,71 @@ import UniformTypeIdentifiers
         } catch { showMessage("Could Not Open Playlist Folder", error.localizedDescription) }
     }
 
+    @objc private func previewStream() {
+        if table.selectedRowIndexes.count > 1 {
+            setStatus("Select one stream to play it, or press Shift+Return to save and open the selection.")
+            return
+        }
+        guard table.selectedRowIndexes.count == 1, let selected, window.attachedSheet == nil else { return }
+        guard let address = StreamPreview.address(selected) else {
+            showMessage("Could Not Play Stream", "The stream does not have a public HTTP or HTTPS address.")
+            return
+        }
+        let workspace = NSWorkspace.shared
+        let associated = (preferences.mediaPlayer == .automatic ? UTType(filenameExtension: "m3u8") : nil)
+            .flatMap { workspace.urlForApplication(toOpen: $0) }
+        guard let (player, target) = StreamPreview.target(choice: preferences.mediaPlayer, associated: associated,
+            associatedIdentifier: associated.flatMap { Bundle(url: $0)?.bundleIdentifier },
+            installed: { workspace.urlForApplication(withBundleIdentifier: $0) }) else {
+            let message = preferences.mediaPlayer == .automatic ? "Install VLC or FastPlay." :
+                "\(preferences.mediaPlayer.title) was not found. Choose another media player in Settings."
+            showMessage("Play Stream", message + " Shift+Return saves and opens a playlist in your default player.")
+            return
+        }
+        let playback: URL
+        do { playback = try player == .fastPlay ? PlaybackHandoff.stage(selected) : address }
+        catch { showMessage("Could Not Play Stream", error.localizedDescription); return }
+        // An explicit app target keeps an HTTP address out of the browser.
+        workspace.open([playback], withApplicationAt: target, configuration: NSWorkspace.OpenConfiguration()) { [weak self] app, error in
+            DispatchQueue.main.async {
+                if error != nil || app == nil {
+                    if player == .fastPlay { try? FileManager.default.removeItem(at: playback) }
+                    self?.showMessage("Could Not Play Stream", "\(player.title) could not open the stream. Try saving a playlist instead.")
+                } else {
+                    self?.setStatus("Sent to \(player.title).")
+                    if player == .fastPlay {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + PlaybackHandoff.retention + 1) {
+                            _ = try? PlaybackHandoff.prune()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @objc private func openStreamInBrowser() {
+        guard table.selectedRowIndexes.count == 1, let selected, window.attachedSheet == nil else { return }
+        guard let address = StreamPreview.address(selected), NSWorkspace.shared.open(address) else {
+            showMessage("Could Not Open Stream", "The stream address could not be opened in your browser.")
+            return
+        }
+        setStatus("Opened in browser.")
+    }
+
     @objc private func openDefaultPlayer() {
-        guard let selected, window.attachedSheet == nil else { return }
+        let selection = selectedStations
+        guard !selection.isEmpty, window.attachedSheet == nil else { return }
         do {
-            let file = try Playlist.saveNew(selected, in: preferences.folder)
-            setStatus("Playlist saved: \(file.lastPathComponent)")
+            let file = try Playlist.saveNew(selection, in: preferences.folder)
+            reportSaved(file, count: selection.count)
             if !NSWorkspace.shared.open(file) {
                 showMessage("Could Not Open the Playlist", "The playlist was saved at:\n\(file.path)\n\nChoose a default app for .m3u8 files in Finder.")
             }
         } catch { showMessage("Playlist Could Not Be Saved", error.localizedDescription) }
+    }
+
+    private func reportSaved(_ file: URL, count: Int) {
+        setStatus("Playlist saved: \(file.lastPathComponent)" + (count > 1 ? ". \(count) streams." : ""))
     }
 
     @objc private func showSettings() {

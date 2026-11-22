@@ -35,6 +35,7 @@ class KeyboardWindow: NSWindow {
     var updates: (() -> Void)?
     var project: (() -> Void)?
     var cancel: (() -> Bool)?
+    var findResult: ((Bool) -> Bool)?
     var keyOrder: (() -> [NSView])?
 
     override func sendEvent(_ event: NSEvent) {
@@ -45,6 +46,7 @@ class KeyboardWindow: NSWindow {
             case (kVK_F1, .shift): if let updates { updates(); return }
             case (kVK_F1, .command), (kVK_F1, .control): if let project { project(); return }
             case (kVK_Escape, []): if cancel?() == true { return }
+            case (kVK_F3, []), (kVK_F3, .shift): if findResult?(flags == .shift) == true { return }
             case (kVK_Tab, []), (kVK_Tab, .shift):
                 if let controls = keyOrder?(), !controls.isEmpty {
                     let reverse = flags == .shift
@@ -86,33 +88,40 @@ final class SettingsTabs: NSTabView {
 final class StreamTable: NSTableView {
     var copyAddress: (() -> Void)?
     var openPlayer: (() -> Void)?
+    var previewStream: (() -> Void)?
+    var openBrowser: (() -> Void)?
     var actionMenu: (() -> NSMenu?)?
+    var didSelectAll: (() -> Void)?
     var hasStreams = false
 
     override var acceptsFirstResponder: Bool { hasStreams && super.acceptsFirstResponder }
 
     @objc func copy(_ sender: Any?) { if selectedRow >= 0 { copyAddress?() } }
 
+    override func selectAll(_ sender: Any?) {
+        super.selectAll(sender)
+        if selectedRow >= 0 { didSelectAll?() }
+    }
+
     override func keyDown(with event: NSEvent) {
         let flags = event.modifierFlags.intersection([.control, .option, .shift, .command])
         if selectedRow >= 0 && (event.keyCode == kVK_Return || event.keyCode == kVK_ANSI_KeypadEnter) {
             if flags == .shift { openPlayer?(); return }
-            if flags.isEmpty, let menu = actionMenu?() {
-                let cell = rect(ofRow: selectedRow)
-                menu.popUp(positioning: nil, at: NSPoint(x: cell.minX + 4, y: cell.maxY), in: self)
-                return
-            }
+            if flags == .option { openBrowser?(); return }
+            if flags.isEmpty { previewStream?(); return }
         }
         super.keyDown(with: event)
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let index = row(at: convert(event.locationInWindow, from: nil))
-        if index >= 0 { selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
+        if index >= 0, !selectedRowIndexes.contains(index) {
+            selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        }
         return selectedRow >= 0 ? actionMenu?() : nil
     }
 
-    // VoiceOver's Show Menu action should open the same native menu as Return.
+    // VoiceOver's Show Menu action should open the native result menu.
     override func accessibilityPerformShowMenu() -> Bool {
         guard selectedRow >= 0, let menu = actionMenu?() else { return false }
         let cell = rect(ofRow: selectedRow)
@@ -171,6 +180,7 @@ final class StreamTable: NSTableView {
     private let tabs = SettingsTabs()
     private let sounds = NSButton(checkboxWithTitle: "Search sounds", target: nil, action: nil)
     private let fallback = NSButton(checkboxWithTitle: "Automatically try other search methods", target: nil, action: nil)
+    private let mediaPlayer = NSPopUpButton()
     private let updates = NSButton(checkboxWithTitle: "Check for updates at startup", target: nil, action: nil)
     private let folder = NSTextField()
     private let apply: (Preferences) -> Void
@@ -178,6 +188,7 @@ final class StreamTable: NSTableView {
     private let soundsHint = "Play a sound when a search starts and another when it finishes."
     private let fallbackHint = "If the chosen method finds no playable stream or cannot finish, try the other methods. This can start a temporary browser and check the public directory. Escape cancels the whole search."
     private let folderHint = "Choose where Shift+Return saves playlists. Command+S starts its Save dialog in the same folder."
+    private let playerHint = "Choose what plays a stream when you press Return. Automatic prefers a supported default playlist app, then VLC or FastPlay. Shift+Return still uses the system default playlist player."
     private let updateHint = "Check for a newer signed release when StreamSift opens. Updates are installed only after you choose Install Update."
 
     init(current: Preferences, manual: @escaping () -> Void, apply: @escaping (Preferences) -> Void) {
@@ -192,6 +203,8 @@ final class StreamTable: NSTableView {
         window.help = { [weak self] in self?.showHelp() }
         sounds.state = current.sounds ? .on : .off
         fallback.state = current.automaticFallback ? .on : .off
+        mediaPlayer.addItems(withTitles: MediaPlayerChoice.allCases.map(\.title))
+        mediaPlayer.selectItem(at: MediaPlayerChoice.allCases.firstIndex(of: current.mediaPlayer) ?? 0)
         updates.state = current.startupUpdates ? .on : .off
         folder.stringValue = current.folder.path
         folder.isBezeled = true
@@ -201,6 +214,11 @@ final class StreamTable: NSTableView {
         label("Automatically try other search methods", for: fallback, hint: fallbackHint)
         label("Check for updates at startup", for: updates, hint: updateHint)
         label("Playlist folder", for: folder, hint: folderHint)
+        label("Media player", for: mediaPlayer, hint: playerHint)
+        let playerLabel = NSTextField(labelWithString: "Media player:")
+        playerLabel.setAccessibilityServesAsTitleForUIElements([mediaPlayer])
+        let playerRow = NSStackView(views: [playerLabel, mediaPlayer])
+        playerRow.alignment = .centerY
         let browse = NSButton(title: "Browse...", target: self, action: #selector(browseFolder))
         let reset = NSButton(title: "Use Default Folder", target: self, action: #selector(defaultFolder))
         label("Browse", for: browse, hint: "Choose the playlist folder in Finder.")
@@ -208,7 +226,7 @@ final class StreamTable: NSTableView {
         let folderLabel = NSTextField(labelWithString: "Playlist folder:")
         folderLabel.setAccessibilityServesAsTitleForUIElements([folder])
         let row = NSStackView(views: [folderLabel, folder, browse])
-        let general = NSStackView(views: [sounds, fallback, row, reset])
+        let general = NSStackView(views: [sounds, fallback, playerRow, row, reset])
         general.orientation = .vertical
         general.alignment = .leading
         general.edgeInsets = NSEdgeInsets(top: 15, left: 15, bottom: 15, right: 15)
@@ -236,7 +254,7 @@ final class StreamTable: NSTableView {
         window.keyOrder = { [weak self, weak browse, weak reset, weak ok, weak cancel] in
             guard let self, let ok, let cancel else { return [] }
             let controls: [NSView?] = tabs.selectedTabViewItem?.identifier as? String == "Updates" ?
-                [tabs, updates, cancel, ok] : [tabs, sounds, fallback, folder, browse, reset, cancel, ok]
+                [tabs, updates, cancel, ok] : [tabs, sounds, fallback, mediaPlayer, folder, browse, reset, cancel, ok]
             return controls.compactMap { $0 }
         }
         window.initialFirstResponder = tabs
@@ -270,6 +288,8 @@ final class StreamTable: NSTableView {
         chosen.automaticFallback = fallback.state == .on
         chosen.startupUpdates = updates.state == .on
         chosen.customFolder = normalized
+        chosen.mediaPlayer = MediaPlayerChoice.allCases.indices.contains(mediaPlayer.indexOfSelectedItem)
+            ? MediaPlayerChoice.allCases[mediaPlayer.indexOfSelectedItem] : .automatic
         apply(chosen)
         dismiss()
     }
@@ -278,7 +298,7 @@ final class StreamTable: NSTableView {
         guard window.attachedSheet == nil else { return }
         let focused = (NSApp.accessibilityFocusedUIElement as? NSView) ?? window.focusedView
         let contents = focused?.accessibilityHelp().flatMap { $0.isEmpty ? nil : $0 } ??
-            "Set up search options, the playlist folder and update checks."
+            "Set up search options, playback, the playlist folder and update checks."
         HelpPanel(title: focused?.accessibilityLabel() ?? "Settings Help", text: contents, manual: manual).present(on: window)
     }
 }

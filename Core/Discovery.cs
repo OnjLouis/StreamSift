@@ -3,23 +3,28 @@ using System.Text;
 
 namespace StreamSift;
 
-public sealed record Station(string Name, Uri Url, string Format, int? Bitrate, Uri FoundOn, bool IsHls);
+public sealed record Station(string Name, Uri Url, string Format, int? Bitrate, Uri FoundOn, bool IsHls, int? Listeners = null);
 public sealed record SearchResult(IReadOnlyList<Station> Stations, int Requests, int Unreachable, bool LimitReached);
 
-internal enum LinkKind { Audio, Playlist, Player, DedicatedPlayer, Script, Catalogue }
+internal enum LinkKind { Audio, Playlist, Player, DedicatedPlayer, Script, Catalogue, ServerStatus }
 internal enum NameOrigin { Inferred, Directory, Playlist }
 internal sealed record Link(Uri Url, Uri FoundOn, LinkKind Kind, string? Name = null, bool AudioHint = false,
-    NameOrigin NameOrigin = NameOrigin.Inferred, Uri? Wrapper = null, bool KeepAddress = false);
+    NameOrigin NameOrigin = NameOrigin.Inferred, Uri? Wrapper = null, bool KeepAddress = false, int? Listeners = null);
 
 public sealed class Discovery(HttpClient client)
 {
     private const int PageRequests = 36, PageResults = 24, CatalogueRequests = 116, CatalogueResults = 96;
     private const int MaxLinks = 200, MaxRedirects = 5;
     private const int TextLimit = 768 * 1024, AudioProbeLimit = 4096;
+    private const int ServerProbeBatch = 4, ServerRequestLimit = 600;
     private static readonly TimeSpan ScanLimit = TimeSpan.FromSeconds(38), RequestLimit = TimeSpan.FromSeconds(7);
+    private static readonly TimeSpan ServerScanLimit = TimeSpan.FromSeconds(65), ServerProbeLimit = TimeSpan.FromSeconds(4);
 
     public Task<SearchResult> FindAsync(Uri start, CancellationToken cancel, IProgress<int>? progress = null) =>
         FindCoreAsync(start, null, cancel, progress);
+
+    internal Task<SearchResult> FindInferredAsync(Uri start, Uri? plain, CancellationToken cancel) =>
+        FindCoreAsync(start, null, cancel, null, plain);
 
     internal Task<SearchResult> VerifyObservedAsync(Uri start, IEnumerable<Uri> candidates,
         CancellationToken cancel, IProgress<int>? progress = null) =>
@@ -31,15 +36,17 @@ public sealed class Discovery(HttpClient client)
         FindCoreAsync(start, candidates, cancel, progress);
 
     private async Task<SearchResult> FindCoreAsync(Uri start, IEnumerable<Link>? observed,
-        CancellationToken cancel, IProgress<int>? progress)
+        CancellationToken cancel, IProgress<int>? progress, Uri? plain = null)
     {
         var todo = new PriorityQueue<(Link Link, int Depth), (int Rank, int Order)>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var names = new Dictionary<string, Link>(StringComparer.Ordinal);
         var results = new Dictionary<string, Station>(StringComparer.Ordinal);
-        int requests = 0, failures = 0;
+        int requests = 0, serverRequests = 0, failures = 0;
         int requestLimit = PageRequests, resultLimit = PageResults;
         Uri? site = null;
+        ServerListing? server = null;
+        bool serverLimit = false, usedServerListing = false;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancel);
         deadline.CancelAfter(ScanLimit);
         Link? preferred = null;
@@ -58,11 +65,25 @@ public sealed class Discovery(HttpClient client)
 
         try
         {
-            while (requests < requestLimit && results.Count < resultLimit && todo.TryDequeue(out var item, out _))
+            while (true)
             {
                 deadline.Token.ThrowIfCancellationRequested();
+                if (server != null)
+                {
+                    deadline.CancelAfter(ServerScanLimit);
+                    await VerifyServerAsync(server);
+                    server = null;
+                    if (results.Count > 0 || serverLimit)
+                    {
+                        usedServerListing = true;
+                        break;
+                    }
+                }
+                if (requests >= requestLimit || results.Count >= resultLimit || !todo.TryDequeue(out var item, out _)) break;
                 if (preferred != null && item.Depth == 0 && item.Link.Url == start && results.Count > 0)
                     continue; // The public playback route supplied playable audio; no web player is needed.
+                bool entry = item.Depth == 0 && (item.Link.Url == start || item.Link.Url == plain);
+                int beforeFetch = requests;
                 using var requestTime = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
                 requestTime.CancelAfter(RequestLimit);
                 var token = requestTime.Token;
@@ -76,11 +97,20 @@ public sealed class Discovery(HttpClient client)
                     {
                         if (requests == requestLimit) throw new HttpRequestException("Request limit reached.");
                         requests++;
-                        progress?.Report(requests);
+                        progress?.Report(requests + serverRequests);
                     }, token);
-                    if (!response.IsSuccessStatusCode) { failures++; continue; }
                     var final = response.RequestMessage?.RequestUri ?? uri;
-                    if (item.Depth == 0 && item.Link.Url == start) site ??= final;
+                    var status = observed == null && entry
+                        ? ServerListings.AdvertisedStatus(final, Header(response, "Server"), Header(response, "icy-notice2")) : null;
+                    if (status != null)
+                        Queue(new Link(status, final, LinkKind.ServerStatus), 1);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        // A streaming server can publish JSON even when it does not serve an HTML index.
+                        if (status == null) failures++;
+                        continue;
+                    }
+                    if (entry) site ??= final;
                     seen.Add(final.AbsoluteUri);
                     var kind = response.Content.Headers.ContentType?.MediaType?.ToLowerInvariant() ?? "";
                     var stationName = Header(response, "icy-name");
@@ -113,8 +143,16 @@ public sealed class Discovery(HttpClient client)
                         Evaluate(Encoding.UTF8.GetString(await Read(body, TextLimit, token)), kind, final, item.Link, item.Depth);
                     }
                 }
-                catch (OperationCanceledException) when (!deadline.IsCancellationRequested) { failures++; }
-                catch (Exception e) when (e is HttpRequestException or IOException) { failures++; }
+                catch (OperationCanceledException) when (!deadline.IsCancellationRequested)
+                {
+                    if (!TryPlain()) failures++;
+                }
+                catch (HttpRequestException e)
+                {
+                    if ((e.HttpRequestError is not (HttpRequestError.ConnectionError or HttpRequestError.SecureConnectionError or
+                        HttpRequestError.InvalidResponse or HttpRequestError.ResponseEnded)) || !TryPlain()) failures++;
+                }
+                catch (IOException) { failures++; }
                 finally
                 {
                     // A reverse proxy can serve the directory without exposing the corresponding mount.
@@ -124,13 +162,24 @@ public sealed class Discovery(HttpClient client)
                         Queue(named with { Url = wrapper, Kind = LinkKind.Playlist, Wrapper = null }, item.Depth);
                     }
                 }
+
+                bool TryPlain()
+                {
+                    // Retry only a scheme-less address with an explicit port when HTTPS could not connect.
+                    if (plain == null || !entry || item.Link.Url != start || site != null || requests - beforeFetch != 1)
+                        return false;
+                    Queue(new Link(plain, plain, LinkKind.Player), 0);
+                    return true;
+                }
             }
         }
         catch (OperationCanceledException) when (!cancel.IsCancellationRequested) { }
         cancel.ThrowIfCancellationRequested();
-        return new(results.Values.OrderBy(s => s.IsHls).ThenBy(s => s.Url.Scheme != "https").ToArray(), requests, failures,
-            deadline.IsCancellationRequested || (todo.Count > 0 && (requests >= requestLimit || results.Count >= resultLimit)) ||
-            seen.Count >= MaxLinks);
+        var ordered = usedServerListing ? results.Values.OrderBy(s => s.Name, StringComparer.InvariantCultureIgnoreCase) :
+            results.Values.OrderBy(s => s.IsHls).ThenBy(s => s.Url.Scheme != "https");
+        return new(ordered.ToArray(), requests + serverRequests, failures,
+            deadline.IsCancellationRequested || serverLimit || (!usedServerListing &&
+            ((todo.Count > 0 && (requests >= requestLimit || results.Count >= resultLimit)) || seen.Count >= MaxLinks)));
 
         void Queue(Link link, int depth)
         {
@@ -140,6 +189,7 @@ public sealed class Discovery(HttpClient client)
             if (depth > 4 || seen.Count >= MaxLinks || !seen.Add(link.Url.AbsoluteUri)) return;
             int rank = link.Kind switch
             {
+                LinkKind.ServerStatus => -3,
                 LinkKind.Catalogue => -2,
                 LinkKind.Audio when link.AudioHint => -1,
                 LinkKind.DedicatedPlayer or LinkKind.Script => 0,
@@ -157,6 +207,8 @@ public sealed class Discovery(HttpClient client)
                 !text.TrimStart('\uFEFF', ' ', '\r', '\n', '\t').StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase))
                 return; // Browser candidates are media, not new starting points for the website crawl.
             var info = Extraction.Read(text, type, address, source, site ?? start, deadline.Token);
+            if (observed == null && info.Server != null && (depth == 0 || source.Kind == LinkKind.ServerStatus))
+                server = info.Server;
             if (info.IsDirectory && observed == null)
             {
                 requestLimit = CatalogueRequests;
@@ -164,6 +216,36 @@ public sealed class Discovery(HttpClient client)
             }
             if (info.LiveHls) Add(address, source, null, "HLS", null, true);
             foreach (var link in info.Links) Queue(link, depth + 1);
+        }
+
+        async Task VerifyServerAsync(ServerListing listing)
+        {
+            bool limited = listing.Truncated;
+            foreach (var mount in listing.Mounts)
+                if (mount.Listeners is int count && results.TryGetValue(mount.Address.AbsoluteUri, out var saved))
+                    results[mount.Address.AbsoluteUri] = saved with { Listeners = count };
+            var remaining = listing.Mounts.Where(m => !results.ContainsKey(m.Address.AbsoluteUri));
+            foreach (var batch in remaining.Chunk(ServerProbeBatch))
+            {
+                if (deadline.IsCancellationRequested || serverRequests >= ServerRequestLimit) { limited = true; break; }
+                var probes = await Task.WhenAll(batch.Select(mount => ProbeMountAsync(mount, listing.Page, CountRequest, deadline.Token)));
+                foreach (var probe in probes)
+                {
+                    if (probe.Station != null) results.TryAdd(probe.Station.Url.AbsoluteUri, probe.Station);
+                    else failures++;
+                    limited |= probe.RateLimited;
+                }
+                progress?.Report(requests + Math.Min(serverRequests, ServerRequestLimit));
+                if (probes.Any(probe => probe.RateLimited)) break;
+            }
+            serverLimit |= limited || serverRequests > ServerRequestLimit;
+            serverRequests = Math.Min(serverRequests, ServerRequestLimit);
+
+            void CountRequest()
+            {
+                if (Interlocked.Increment(ref serverRequests) > ServerRequestLimit)
+                    throw new HttpRequestException("Server listing request limit reached.");
+            }
         }
 
         void Add(Uri address, Link source, string? name, string format, int? bitrate, bool hls)
@@ -174,9 +256,35 @@ public sealed class Discovery(HttpClient client)
             var key = SomaMount(address) ?? address.AbsoluteUri;
             var playbackAddress = source.KeepAddress || (observed != null && source.Kind == LinkKind.Audio)
                 ? source.Url : address;
-            var station = new Station(title, playbackAddress, format, bitrate, stable?.FoundOn ?? source.FoundOn, hls);
+            var station = new Station(title, playbackAddress, format, bitrate, stable?.FoundOn ?? source.FoundOn, hls,
+                stable?.Listeners ?? source.Listeners);
             if (!results.TryAdd(key, station) && address.Scheme == "https" && results[key].Url.Scheme == "http") results[key] = station;
         }
+    }
+
+    private async Task<(Station? Station, bool RateLimited)> ProbeMountAsync(ServerMount mount, Uri listing,
+        Action count, CancellationToken cancel)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        deadline.CancelAfter(ServerProbeLimit);
+        try
+        {
+            using var response = await Fetch(mount.Address, count, deadline.Token);
+            if (response.StatusCode == HttpStatusCode.TooManyRequests) return (null, true);
+            var content = response.Content;
+            var kind = content.Headers.ContentType?.MediaType?.ToLowerInvariant() ?? "";
+            if (!response.IsSuccessStatusCode || content.Headers.ContentLength.HasValue ||
+                !(ServerListings.AudioType(kind) || kind is "" or "application/octet-stream")) return (null, false);
+            await using var body = await content.ReadAsStreamAsync(deadline.Token);
+            string? format = Sniff(await Read(body, AudioProbeLimit, deadline.Token, stopOnAudio: true));
+            if (format == null) return (null, false);
+            string name = mount.Name ?? Extraction.StationName(Header(response, "icy-name")) ??
+                Extraction.Label(mount.Address.AbsolutePath.Trim('/')) ?? mount.Address.Host;
+            var bitrate = int.TryParse(Header(response, "icy-br"), out var kbps) && kbps is > 0 and <= 10000
+                ? kbps : mount.Bitrate;
+            return (new Station(name, mount.Address, format, bitrate, listing, false, mount.Listeners), false);
+        }
+        catch (Exception e) when (e is HttpRequestException or IOException or OperationCanceledException) { return (null, false); }
     }
 
     private static string? SomaMount(Uri uri)

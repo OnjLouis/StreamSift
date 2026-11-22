@@ -10,8 +10,9 @@ internal static class Program
     {
         ApplicationConfiguration.Initialize();
         if (AppUpdate.Run(args)) return 0;
-        using var window = new MainForm();
-        if (args is ["--check-controls"]) return window.CheckControls();
+        bool checkingControls = args is ["--check-controls"];
+        using var window = new MainForm(readHistory: !checkingControls);
+        if (checkingControls) return window.CheckControls();
         Application.Run(window);
         return 0;
     }
