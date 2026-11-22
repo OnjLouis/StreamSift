@@ -16,11 +16,7 @@ internal sealed class MainForm : Form
         AccessibleName = "Streams", View = View.Details, FullRowSelect = true, HideSelection = false,
         Dock = DockStyle.Fill, TabIndex = 2
     };
-    private readonly TextBox details = new()
-    {
-        AccessibleName = "Stream details", ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Vertical,
-        Dock = DockStyle.Fill, TabIndex = 4
-    };
+    private readonly DetailList details = new() { Dock = DockStyle.Fill, TabIndex = 4 };
     private readonly TextBox status = new() { AccessibleName = "Status", ReadOnly = true, Dock = DockStyle.Fill, TabIndex = 5 };
     private readonly Label streamsLabel = new() { Text = "&Streams:", AutoSize = true, Anchor = AnchorStyles.Left, TabIndex = 1 };
     private readonly Label detailsLabel = new() { Text = "Stream &Details:", AutoSize = true, Anchor = AnchorStyles.Left, TabIndex = 3 };
@@ -138,13 +134,14 @@ internal sealed class MainForm : Form
         };
         results.Resize += (_, _) => results.Columns[0].Width =
             Math.Max(145, results.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 4);
+        details.Command += RunDetailAction;
 
         var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Padding = new(12) };
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 95));
+        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 120));
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         grid.Controls.Add(entry, 0, 0);
         grid.Controls.Add(streamsLabel, 0, 1);
@@ -160,7 +157,7 @@ internal sealed class MainForm : Form
         help[findBrowser] = "Look for live audio using a temporary, muted browser. Requires Chrome or Microsoft Edge.";
         help[cancel] = "Stop the current search. You can also press Escape.";
         help[results] = "F5 repeats the current search. Ctrl+L filters and sorts, Ctrl+F finds text, and Ctrl+A selects all visible streams. Enter plays one stream; Alt+Enter opens its address in your browser.";
-        help[details] = "Review the first selected stream's address and the page where it was found. Ctrl+C copies selected text. Alt+S returns to Streams.";
+        help[details] = "Use the arrow keys to review the first selected stream. Enter searches the selected address; Alt+Enter opens it in your browser. Ctrl+C copies the row value. Use the context menu to scan the stream server. Alt+S returns to Streams.";
         help[status] = "Review the last result or operation. A search with no results does not prove that the website has no live stream.";
         find.Click += async (_, _) => await FindAsync();
         findBrowser.Click += async (_, _) => await FindAsync(SearchMethod.Browser);
@@ -233,11 +230,11 @@ internal sealed class MainForm : Form
         if (lastSearch is { } request) _ = FindAsync(request.Method, request.Input);
     }
 
-    private async Task FindAsync(SearchMethod mode = SearchMethod.Passive, string? refreshInput = null)
+    private async Task FindAsync(SearchMethod mode = SearchMethod.Passive, string? refreshInput = null, string? newInput = null)
     {
         if (scan != null || updateCheck != null) return;
         bool refreshing = refreshInput != null;
-        var searchText = refreshInput ?? url.Text;
+        var searchText = refreshInput ?? newInput ?? url.Text;
         var requestedMethod = mode;
         bool nameInput = SearchSequence.CanSearchStation(searchText);
         bool hasAddress = PublicNetwork.TryInput(searchText, out _) && !nameInput;
@@ -263,8 +260,8 @@ internal sealed class MainForm : Form
         bool focusCancel = url.ContainsFocus || find.Focused || findBrowser.Focused || results.Focused || details.Focused;
         cancel.Enabled = true;
         if (focusCancel) cancel.Focus();
-        if (refreshing) url.Text = searchText;
-        else ClearResults();
+        if (refreshing || newInput != null) url.Text = searchText;
+        if (!refreshing) ClearResults();
         lastSearch = (searchText, requestedMethod);
         UpdateSelection();
         SetStatus(refreshing ? "Refreshing results..." : StartingSearch(mode));
@@ -580,16 +577,30 @@ internal sealed class MainForm : Form
         copyCommand.Enabled = foobarCommand.Enabled = saveCommand.Enabled = openPlayerCommand.Enabled = selected != null;
         previewCommand.Enabled = openBrowserCommand.Enabled = count == 1;
         copyCommand.Text = count > 1 ? "Copy stream addresses" : "Copy stream address";
-        string info = selected == null ? "" : string.Join("\r\n",
-            selected.Name, "Format: " + selected.Format,
-            selected.Bitrate is int bitrate ? $"Bitrate: {bitrate} kbps" : "Bitrate: not reported",
-            "Stream address:", selected.Url.AbsoluteUri, "Found on:", selected.FoundOn.AbsoluteUri);
-        if (selected?.Listeners is int listeners) info += $"\r\nListeners at scan: {listeners}";
-        if (count > 1) info = $"{count} streams selected. Details for the first stream:\r\n\r\n" + info;
-        if (details.Text != info)
+        details.CanSearch = scan == null && updateCheck == null;
+        details.ShowRows(DetailRow.Rows(selected, count));
+    }
+
+    private void RunDetailAction(DetailAction action, DetailRow row)
+    {
+        switch (action)
         {
-            details.Text = info;
-            details.Select(0, 0);
+            case DetailAction.Search when row.Address is Uri address:
+                _ = FindAsync(newInput: address.AbsoluteUri);
+                break;
+            case DetailAction.ScanServer when row.Server is Uri server:
+                _ = FindAsync(newInput: server.AbsoluteUri);
+                break;
+            case DetailAction.OpenBrowser when row.Address is Uri address:
+                OpenAddressInBrowser(address);
+                break;
+            case DetailAction.Copy:
+                SafeAction(() =>
+                {
+                    Clipboard.SetText(row.Value);
+                    SetStatus(row.Label + " copied.");
+                });
+                break;
         }
     }
 
@@ -721,10 +732,15 @@ internal sealed class MainForm : Form
     private void OpenInBrowser()
     {
         if (results.SelectedItems.Count != 1 || Selected is not Station item) return;
+        OpenAddressInBrowser(item.Url);
+    }
+
+    private void OpenAddressInBrowser(Uri target)
+    {
         SafeAction(() =>
         {
-            if (!PublicNetwork.TryUrl(item.Url.AbsoluteUri, null, out var address))
-                throw new InvalidDataException("The stream does not have a public HTTP or HTTPS address.");
+            if (!PublicNetwork.TryUrl(target.AbsoluteUri, null, out var address))
+                throw new InvalidDataException("This is not a public HTTP or HTTPS address.");
             Open(address.AbsoluteUri);
             SetStatus("Opened in browser.");
         });
@@ -812,7 +828,7 @@ internal sealed class MainForm : Form
             page.Controls.GetChildIndex(url) < page.Controls.GetChildIndex(buttons) &&
             url.TabIndex < buttons.TabIndex && find.TabIndex < findBrowser.TabIndex && findBrowser.TabIndex < cancel.TabIndex &&
             page.TabIndex < results.TabIndex && results.TabIndex < details.TabIndex && details.TabIndex < status.TabIndex &&
-            results.Parent == panel && !details.AcceptsTab && details.ReadOnly && status.ReadOnly &&
+            results.Parent == panel && details.Parent == panel && !details.MultiSelect && status.ReadOnly &&
             results.AccessibilityObject.Name == "Streams" && url.AccessibilityObject.Name == "Website address or station name" &&
             url.DropDownStyle == ComboBoxStyle.DropDown && url.MaxDropDownItems == SearchHistory.Capacity &&
             !clearHistoryCommand.Enabled && url.Items.Count == 0 &&
@@ -873,6 +889,7 @@ internal sealed class MainForm : Form
             DisplayNames([a]) is ["Theme"];
         ok &= !results.TabStop && !details.TabStop && status.TabStop && !streamsCommand.Enabled && !detailsCommand.Enabled;
         _ = results.Handle;
+        _ = details.Handle;
         var row = results.Items.Add(ResultRow(a, a.Name));
         ok &= results.Columns.Count == 1 && row.SubItems.Count == 1 && row.Text == "Theme, MP3, 192 kbps" &&
             ResultRow(a with { Bitrate = null }, a.Name).Text == "Theme, MP3" &&
@@ -882,7 +899,13 @@ internal sealed class MainForm : Form
         UpdateSelection();
         ok &= results.TabStop && details.TabStop && streamsCommand.Enabled && detailsCommand.Enabled;
         detailsCommand.PerformClick();
-        ok &= ActiveControl == details && row.Selected;
+        ok &= ActiveControl == details && row.Selected && details.SelectedDetail is { Kind: DetailKind.StreamAddress } detail &&
+            detail.Value == a.Url.AbsoluteUri && DetailList.ActionFor(Keys.Enter, detail, true) == DetailAction.Search &&
+            DetailList.ActionFor(Keys.Alt | Keys.Enter, detail, true) == DetailAction.OpenBrowser &&
+            DetailList.ActionFor(Keys.Control | Keys.C, detail, true) == DetailAction.Copy &&
+            DetailList.ActionFor(Keys.Enter, detail, false) == null &&
+            (details.Items[1].Tag as DetailRow)?.Address == a.FoundOn &&
+            DetailList.ActionFor(Keys.Enter, (DetailRow)details.Items[2].Tag!, true) == null;
         streamsCommand.PerformClick();
         ok &= ActiveControl == results && row.Selected;
         row.Selected = false;
@@ -893,7 +916,11 @@ internal sealed class MainForm : Form
         SelectAllStreams();
         ok &= results.SelectedItems.Count == 2 && SelectedStreams().SequenceEqual([a, b]) &&
             saveCommand.Enabled && !previewCommand.Enabled && copyCommand.Text == "Copy stream addresses" &&
-            details.Text.StartsWith("2 streams selected.", StringComparison.Ordinal);
+            details.Items.Cast<ListViewItem>().Any(item => item.Text == "Selection: Details for the first of 2 streams");
+        var testOrigin = new Uri("https://example.com:9020/song?token=fixture");
+        var rows = DetailRow.Rows(a with { Url = testOrigin }, 1);
+        ok &= rows[0].Value == testOrigin.AbsoluteUri && rows[0].Server?.AbsoluteUri == "https://example.com:9020/" &&
+            rows[1].Server == null && DetailRow.Rows(null, 0).Length == 0;
         history = ["second.example", "first.example"];
         url.Text = "current.example";
         RefreshHistory();

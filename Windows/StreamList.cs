@@ -8,8 +8,6 @@ internal sealed class StreamList : ListView
 {
     internal const string PlayLabel = "Play stream";
     internal const string BrowserLabel = "Open stream in browser";
-    private const int WmContextMenu = 0x007b, WmNull = 0;
-    private const uint TpmReturnCmd = 0x0100, TpmRightButton = 0x0002, MenuGrayed = 0x0001;
     private bool selectingAll;
     internal event Action<StreamAction>? Command;
 
@@ -76,7 +74,7 @@ internal sealed class StreamList : ListView
 
     protected override void WndProc(ref Message m)
     {
-        if (m.Msg != WmContextMenu) { base.WndProc(ref m); return; }
+        if (m.Msg != NativeRowMenu.ContextMessage) { base.WndProc(ref m); return; }
         int xy = unchecked((int)m.LParam.ToInt64());
         if (xy == -1) { Open(null); return; }
         var screen = new Point(unchecked((short)xy), unchecked((short)(xy >> 16)));
@@ -99,27 +97,41 @@ internal sealed class StreamList : ListView
     private void Open(Point? screen)
     {
         if (SelectedItems.Count == 0 || FindForm() is not Form owner) return;
+        bool single = SelectedItems.Count == 1;
+        var row = (FocusedItem is { Selected: true } focused ? focused : SelectedItems[0]).Bounds;
+        var position = screen ?? PointToScreen(new Point(row.Left + 10, row.Bottom));
+        var picked = (StreamAction)NativeRowMenu.Show(owner, position,
+        [
+            ((int)StreamAction.Preview, PlayLabel + "\tEnter", single),
+            ((int)StreamAction.OpenBrowser, BrowserLabel + "\tAlt+Enter", single),
+            ((int)StreamAction.Copy, (single ? "Copy stream address" : "Copy stream addresses") + "\tCtrl+C", true),
+            ((int)StreamAction.Save, "Save playlist...\tCtrl+S", true),
+            ((int)StreamAction.Foobar, "Add to Foobar2000\tCtrl+Shift+F", true),
+            ((int)StreamAction.OpenDefault, "Save and open in default player\tShift+Enter", true)
+        ]);
+        if (picked != 0) Command?.Invoke(picked);
+    }
+}
+
+internal static class NativeRowMenu
+{
+    internal const int ContextMessage = 0x007b;
+    private const int WmNull = 0;
+    private const uint TpmReturnCmd = 0x0100, TpmRightButton = 0x0002, MenuGrayed = 0x0001;
+
+    internal static int Show(Form owner, Point screen, IReadOnlyList<(int Id, string Caption, bool Enabled)> commands)
+    {
         nint menu = CreatePopupMenu();
-        if (menu == 0) return;
-        StreamAction picked = 0;
+        if (menu == 0) return 0;
         try
         {
-            bool single = SelectedItems.Count == 1;
-            if (!AppendMenu(menu, single ? 0 : MenuGrayed, (nuint)StreamAction.Preview, PlayLabel + "\tEnter") ||
-                !AppendMenu(menu, single ? 0 : MenuGrayed, (nuint)StreamAction.OpenBrowser, BrowserLabel + "\tAlt+Enter") ||
-                !AppendMenu(menu, 0, (nuint)StreamAction.Copy, (single ? "Copy stream address" : "Copy stream addresses") + "\tCtrl+C") ||
-                !AppendMenu(menu, 0, (nuint)StreamAction.Save, "Save playlist...\tCtrl+S") ||
-                !AppendMenu(menu, 0, (nuint)StreamAction.Foobar, "Add to Foobar2000\tCtrl+Shift+F") ||
-                !AppendMenu(menu, 0, (nuint)StreamAction.OpenDefault, "Save and open in default player\tShift+Enter")) return;
-            var row = (FocusedItem is { Selected: true } focused ? focused : SelectedItems[0]).Bounds;
-            var position = screen ?? PointToScreen(new Point(row.Left + 10, row.Bottom));
-            picked = (StreamAction)TrackPopupMenuEx(menu, TpmReturnCmd | TpmRightButton,
-                position.X, position.Y, owner.Handle, 0);
+            foreach (var (id, caption, enabled) in commands)
+                if (!AppendMenu(menu, enabled ? 0 : MenuGrayed, (nuint)id, caption)) return 0;
+            int picked = (int)TrackPopupMenuEx(menu, TpmReturnCmd | TpmRightButton, screen.X, screen.Y, owner.Handle, 0);
             PostMessage(owner.Handle, WmNull, 0, 0);
+            return picked;
         }
         finally { DestroyMenu(menu); }
-        if (picked is StreamAction.Copy or StreamAction.Save or StreamAction.Foobar or StreamAction.OpenDefault or StreamAction.Preview or StreamAction.OpenBrowser)
-            Command?.Invoke(picked);
     }
 
     [DllImport("user32.dll")] private static extern nint CreatePopupMenu();

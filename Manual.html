@@ -26,6 +26,11 @@ dd { margin-bottom: .5rem; }
 </ul>
 </nav>
 <h2 id="changes">Version history</h2>
+<h3>1.2.10</h3>
+<ul>
+<li>Global's HTTPS stream directory now returns its full list, including Smooth Chill.</li>
+<li>Stream Details now has selectable rows. Search an address, copy it, open it in your browser, or scan its server without typing the address again.</li>
+</ul>
 <h3>1.2.9</h3>
 <ul>
 <li>Discover more streams on large server listings, including Global, Icecast and SHOUTcast. Find active microphones from the Locus Sonus soundmap.</li>
@@ -63,6 +68,7 @@ dd { margin-bottom: .5rem; }
 <p><strong>Refresh results:</strong> Press F5 to repeat the last search using its original address or name and search command. The selection, format filter and sort order are kept where still available. Counts are fetched once during the refresh; there is no automatic polling.</p>
 <p>Press Ctrl+L for <strong>Filter and sort</strong>. Choose a format that occurs in the current results, or All formats. Sort by station name, bitrate, listener count when reported, or the original search order. Unreported values appear last in numeric orders. Listener counts are snapshots from the scan, not live counters. These choices reset when you start another search. Press Ctrl+F to find text in the visible rows, then use F3 or Shift+F3 to continue forward or backward.</p>
 <p>In Streams, press Ctrl+A to select all results or hold Shift while moving through the list to select a range. Saving, copying or sending to Foobar2000 includes the full selection in list order. Stream Details shows the first selected stream when more than one is selected.</p>
+<p>In Stream Details (Alt+D), use the arrow keys to choose a row. On <strong>Stream address</strong> or <strong>Found on</strong>, press Enter to search that exact address or Alt+Enter to open it in your browser. Ctrl+C copies the selected value without the label or extra punctuation. On Stream address, use the Application key or Shift+F10 and choose <strong>Scan stream server</strong> to search the server root instead. The search keeps the original scheme and port.</p>
 <ul>
 <li><strong>Play stream:</strong> Select one stream and press Enter to send its address directly to the media player chosen in Preferences, without saving a playlist. Foobar2000 handles this like opening a file from File Explorer; its incoming-file settings decide the destination, and it may replace the active playlist. To add streams without starting playback, use Add to Foobar2000 instead.</li>
 <li><strong>Open stream in browser:</strong> Open the selected stream address in your default browser without saving a playlist. The browser decides whether it can play that format.</li>

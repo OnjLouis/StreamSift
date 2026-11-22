@@ -13,7 +13,7 @@ import UniformTypeIdentifiers
     private let findBrowser = NSButton(title: "Find with Browser", target: nil, action: nil)
     private let cancel = NSButton(title: "Cancel", target: nil, action: nil)
     private let table = StreamTable()
-    private let details = readOnlyText("Stream details", hint: "Review the first selected stream. Command+2 returns to Streams.")
+    private let details = DetailTable()
     private let status = readOnlyText("Status", hint: "Read the latest search or action result.")
     private let defaults = UserDefaults.standard
     private lazy var history = SearchHistory(reading: defaults)
@@ -127,6 +127,11 @@ import UniformTypeIdentifiers
         table.actionMenu = { [weak self] in self?.resultMenu() }
         table.dataSource = self
         table.delegate = self
+        details.configure()
+        label("Stream details", for: details,
+              hint: "Return searches a selected address. Option+Return opens it in your browser. Command+C copies the row. The context menu can scan the stream server.")
+        details.onCommand = { [weak self] command, row in self?.runDetailAction(command, row: row) }
+        details.actionMenu = { [weak self] in self?.detailMenu() }
         let listView = scroll(table)
         let detailView = scroll(details)
         let statusView = scroll(status)
@@ -139,7 +144,7 @@ import UniformTypeIdentifiers
         for view in [entry, listView, detailView, statusView] {
             view.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -28).isActive = true
         }
-        detailView.heightAnchor.constraint(equalToConstant: 96).isActive = true
+        detailView.heightAnchor.constraint(equalToConstant: 118).isActive = true
         statusView.heightAnchor.constraint(equalToConstant: 53).isActive = true
         listView.setContentHuggingPriority(.defaultLow, for: .vertical)
         window.initialFirstResponder = address
@@ -199,7 +204,7 @@ import UniformTypeIdentifiers
             item("Refresh Results", #selector(refreshResults), "r"), .separator(),
             item("Copy Stream Addresses", #selector(copyAddress)),
             item("Play Stream", #selector(previewStream)),
-            item("Open Stream in Browser", #selector(openStreamInBrowser), "\r", modifiers: .option),
+            item("Open in Browser", #selector(openFocusedAddressInBrowser), "\r", modifiers: .option),
             item("Save and Open in Default Player", #selector(openDefaultPlayer)), .separator(),
             item("Go to Address", #selector(focusAddress), "1"),
             item("Go to Streams", #selector(focusStreams), "2"),
@@ -238,8 +243,17 @@ import UniformTypeIdentifiers
         switch menuItem.action {
         case #selector(savePlaylist), #selector(copyAddress), #selector(openDefaultPlayer), #selector(focusDetails):
             return selected != nil && window.isKeyWindow && window.attachedSheet == nil
+        case #selector(openFocusedAddressInBrowser):
+            return (window.focusedView === details ? details.selectedDetail?.address != nil : table.selectedRowIndexes.count == 1) &&
+                window.isKeyWindow && window.attachedSheet == nil
         case #selector(previewStream), #selector(openStreamInBrowser):
             return table.selectedRowIndexes.count == 1 && window.isKeyWindow && window.attachedSheet == nil
+        case #selector(searchDetail):
+            return details.canSearch && details.selectedDetail?.address != nil && window.attachedSheet == nil
+        case #selector(scanDetailServer):
+            return details.canSearch && details.selectedDetail?.server != nil && window.attachedSheet == nil
+        case #selector(openDetail), #selector(copyDetail):
+            return details.selectedDetail != nil && window.attachedSheet == nil
         case #selector(focusAddress):
             return job == nil && window.isKeyWindow && window.attachedSheet == nil
         case #selector(focusStreams):
@@ -285,17 +299,7 @@ import UniformTypeIdentifiers
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        if let selected {
-            details.string = [selected.name, "Format: " + selected.format,
-                              selected.bitrate.map { "Bitrate: \($0) kbps" } ?? "Bitrate: not reported",
-                              "Stream address:", selected.url, "Found on:", selected.foundOn].joined(separator: "\n")
-            if let listeners = selected.listeners { details.string += "\nListeners at scan: \(listeners)" }
-            let count = table.selectedRowIndexes.count
-            if count > 1 { details.string = "\(count) streams selected. Details for the first stream:\n\n" + details.string }
-        } else {
-            details.string = ""
-        }
-        details.setSelectedRange(NSRange(location: 0, length: 0))
+        details.showRows(DetailRow.rows(for: selected, selectedCount: table.selectedRowIndexes.count))
         refreshNavigation()
     }
 
@@ -303,6 +307,7 @@ import UniformTypeIdentifiers
         table.hasStreams = !stations.isEmpty
         table.setAccessibilityElement(table.hasStreams)
         details.setAccessibilityElement(selected != nil)
+        details.canSearch = job == nil
         address.isEnabled = job == nil
         find.isEnabled = job == nil
         findBrowser.isEnabled = job == nil
@@ -422,10 +427,10 @@ import UniformTypeIdentifiers
         startSearch(mode: lastSearch.mode, refreshInput: lastSearch.input)
     }
 
-    private func startSearch(mode: SearchMode, refreshInput: String? = nil) {
+    private func startSearch(mode: SearchMode, refreshInput: String? = nil, newInput: String? = nil) {
         guard job == nil else { return }
         let refreshing = refreshInput != nil
-        let input = refreshInput ?? address.currentEditor()?.string ?? address.stringValue
+        let input = refreshInput ?? newInput ?? address.currentEditor()?.string ?? address.stringValue
         let running = ScanJob()
         do {
             try running.start(input, mode: mode, fallback: preferences.automaticFallback, onFallback: { [weak self, weak running] next in
@@ -438,7 +443,7 @@ import UniformTypeIdentifiers
             if !refreshing { load([]) }
             refreshNavigation()
             window.makeFirstResponder(cancel)
-            if refreshing { address.stringValue = input }
+            if refreshing || newInput != nil { address.stringValue = input }
             setStatus(refreshing ? "Refreshing results..." : mode.starting)
             if preferences.sounds { startSound?.stop(); startSound?.play() }
         } catch {
@@ -526,13 +531,57 @@ import UniformTypeIdentifiers
         return menu
     }
 
+    private func detailMenu() -> NSMenu? {
+        guard let row = details.selectedDetail else { return nil }
+        let menu = NSMenu()
+        if row.address != nil {
+            menu.addItem(item("Search This Address", #selector(searchDetail), "\r", modifiers: []))
+            menu.addItem(item("Open in Browser", #selector(openDetail), "\r", modifiers: .option))
+        }
+        menu.addItem(item(row.address == nil ? "Copy Value" : "Copy Address", #selector(copyDetail), "c"))
+        if row.server != nil { menu.addItem(item("Scan Stream Server", #selector(scanDetailServer))) }
+        return menu
+    }
+
+    @objc private func searchDetail() {
+        if let row = details.selectedDetail { runDetailAction(.search, row: row) }
+    }
+
+    @objc private func openDetail() {
+        if let row = details.selectedDetail { runDetailAction(.openBrowser, row: row) }
+    }
+
+    @objc private func copyDetail() {
+        if let row = details.selectedDetail { runDetailAction(.copy, row: row) }
+    }
+
+    @objc private func scanDetailServer() {
+        if details.canSearch, let server = details.selectedDetail?.server {
+            startSearch(mode: .passive, newInput: server.absoluteString)
+        }
+    }
+
+    private func runDetailAction(_ command: DetailTable.Command, row: DetailRow) {
+        switch command {
+        case .search:
+            if details.canSearch, let target = row.address { startSearch(mode: .passive, newInput: target.absoluteString) }
+        case .openBrowser:
+            if let target = row.address { openAddressInBrowser(target) }
+        case .copy:
+            copyText(row.value, confirmation: row.label + " copied.")
+        }
+    }
+
     @objc private func copyAddress() {
         let selection = selectedStations
         guard !selection.isEmpty else { return }
+        copyText(selection.map(\.url).joined(separator: "\n"),
+                 confirmation: selection.count == 1 ? "Stream address copied." : "\(selection.count) stream addresses copied.")
+    }
+
+    private func copyText(_ text: String, confirmation: String) {
         NSPasteboard.general.clearContents()
-        if NSPasteboard.general.setString(selection.map(\.url).joined(separator: "\n"), forType: .string) {
-            setStatus(selection.count == 1 ? "Stream address copied." : "\(selection.count) stream addresses copied.")
-        }
+        if NSPasteboard.general.setString(text, forType: .string) { setStatus(confirmation) }
         else { showMessage("Copy Could Not Finish", "The clipboard is unavailable. Try again.") }
     }
 
@@ -607,9 +656,18 @@ import UniformTypeIdentifiers
         }
     }
 
+    @objc private func openFocusedAddressInBrowser() {
+        if window.focusedView === details { openDetail(); return }
+        openStreamInBrowser()
+    }
+
     @objc private func openStreamInBrowser() {
         guard table.selectedRowIndexes.count == 1, let selected, window.attachedSheet == nil else { return }
-        guard let address = StreamPreview.address(selected), NSWorkspace.shared.open(address) else {
+        if let address = StreamPreview.address(selected) { openAddressInBrowser(address) }
+    }
+
+    private func openAddressInBrowser(_ address: URL) {
+        guard NSWorkspace.shared.open(address) else {
             showMessage("Could Not Open Stream", "The stream address could not be opened in your browser.")
             return
         }

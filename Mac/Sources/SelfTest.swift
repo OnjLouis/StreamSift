@@ -48,6 +48,15 @@ func selfTest() throws {
     let row = Station(name: "Lyd \u{e9}\nFM", url: "https://radio.example/stream", format: "MP3", bitrate: 320,
                       foundOn: "https://radio.example/")
     let quiet = Station(name: "Able", url: "https://radio.example/quiet", format: "AAC", bitrate: 48, foundOn: "")
+    let addressed = Station(name: "Example", url: "https://radio.example:9020/stream?token=fixture",
+                            format: "MP3", bitrate: 128, foundOn: "https://radio.example/list", listeners: 0)
+    let detail = DetailRow.rows(for: addressed, selectedCount: 2)
+    try require(detail.first?.value == addressed.url && detail.first?.address?.absoluteString == addressed.url &&
+                detail.first?.server?.absoluteString == "https://radio.example:9020/" &&
+                detail[1].address?.absoluteString == addressed.foundOn && detail[1].server == nil &&
+                detail[2].address == nil && detail.contains { $0.kind == .listeners && $0.value == "0" } &&
+                detail.last?.text == "Selection: Details for the first of 2 streams" &&
+                DetailRow.rows(for: nil, selectedCount: 0).isEmpty, "Detail actions target the raw address and its exact server")
     let unknown = Station(name: "Local", url: "https://radio.example/local", format: "MP3", bitrate: nil, foundOn: "")
     let mixed = [unknown, row, quiet]
     try require(ResultView.formats(mixed) == ["AAC", "MP3"] && ResultView.formats([quiet]) == ["AAC"],

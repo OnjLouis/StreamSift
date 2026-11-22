@@ -612,12 +612,12 @@ Require(proxy.Stations is [{ Name: "Example Radio", Url.Port: 8000 }] && proxy.R
 
 const string customRoot = "https://stations.example/";
 const int customCount = 288;
-string Card(string path, string? title = null) => $"""
+string Card(string path, string? title = null, string? direct = null, string? playlist = null) => $"""
     <div class="stream-container">
-        <div><div class="stream-name">Mount Point {path}</div><a href="{path}.m3u">M3U</a></div>
+        <div><div class="stream-name">Mount Point {path}</div><a href="{playlist ?? path + ".m3u"}">M3U</a></div>
         <table class="stream"><tr><td>Stream Title:</td><td>{title ?? $"Named {path}"}</td></tr>
         <tr><td>Content Type:</td><td>audio/mpeg</td></tr>
-        <tr><td>Stream URL:</td><td><a href="{path}">Direct</a></td></tr></table>
+        <tr><td>Stream URL:</td><td><a href="{direct ?? path}">Direct</a></td></tr></table>
     </div>
     """;
 handler.Text(customRoot, string.Concat(Enumerable.Range(1, customCount).Select(i => Card($"/channel{i}"))) +
@@ -639,6 +639,32 @@ foreach (var mount in new[] { "CapitalCymru", "CapitalLondon", "CapitalNewcastle
 var namedListing = await engine.FindAsync(new Uri(namesRoot), CancellationToken.None);
 Require(namedListing.Stations.Select(s => s.Name).SequenceEqual(["Capital London", "Capital North East", "Capital North Wales"]),
     "Server listing results sort by displayed station name, not mount order.");
+
+const string globalTls = "https://media-ssl.musicradio.com/";
+const string globalAdvertised = "https://media-ice.musicradio.com";
+string GlobalCard(string path, string? title = null) =>
+    Card(path, title, globalAdvertised + path, globalAdvertised + path + ".m3u");
+var globalPaths = Enumerable.Range(1, 27).Select(i => $"/channel{i}").Append("/SmoothChillMP3").ToArray();
+handler.Text(globalTls, string.Concat(globalPaths.Select(p => GlobalCard(p, p == "/SmoothChillMP3" ? "Smooth Chill" : null))) +
+    Card("/wrong", direct: globalAdvertised + "/not-the-mount", playlist: globalAdvertised + "/wrong.m3u") +
+    Card("/wrongport", direct: globalAdvertised + ":8443/wrongport", playlist: globalAdvertised + "/wrongport.m3u") +
+    Card("/wrongplaylist", direct: globalAdvertised + "/wrongplaylist", playlist: "https://third-party.example/wrongplaylist.m3u"));
+foreach (var mount in globalPaths)
+    handler.Audio(globalTls + mount[1..], mp3);
+int beforeGlobalAlias = handler.Seen.Count;
+var globalListing = await engine.FindAsync(new Uri(globalTls), CancellationToken.None);
+Require(globalListing.Stations.Count == globalPaths.Length && !globalListing.LimitReached &&
+    globalListing.Stations.Any(s => s.Name == "Smooth Chill" && s.Url.AbsoluteUri == globalTls + "SmoothChillMP3") &&
+    handler.Seen.Skip(beforeGlobalAlias).Order().SequenceEqual(globalPaths.Select(p => globalTls + p[1..]).Append(globalTls).Order()),
+    "Global's HTTPS alias accepts the canonical listing links, but probes only exact mounts on the requested host.");
+
+const string otherServer = "https://other-listing.example/";
+var otherAddress = new Uri(otherServer);
+var otherListing = Extraction.Read(GlobalCard("/SmoothChillMP3"), "text/html", otherAddress,
+    new Link(otherAddress, otherAddress, LinkKind.Player), otherAddress, CancellationToken.None);
+Require(otherListing.Server == null,
+    "Global's advertised host does not relax server listing validation on unrelated websites.");
+
 handler.Fail(customRoot + "channel1", HttpStatusCode.TooManyRequests);
 var rateLimited = await engine.FindAsync(new Uri(customRoot), CancellationToken.None);
 Require(rateLimited is { Requests: 5, LimitReached: true } && rateLimited.Stations.Count == 3,

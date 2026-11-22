@@ -33,8 +33,10 @@ enum StreamPreview {
         return nil
     }
 
-    static func address(_ station: Station) -> URL? {
-        guard let parts = URLComponents(string: station.url), ["http", "https"].contains(parts.scheme ?? ""),
+    static func address(_ station: Station) -> URL? { address(station.url) }
+
+    static func address(_ text: String) -> URL? {
+        guard let parts = URLComponents(string: text), ["http", "https"].contains(parts.scheme ?? ""),
               let host = parts.host, !host.isEmpty, parts.user == nil, parts.password == nil else { return nil }
         return parts.url
     }

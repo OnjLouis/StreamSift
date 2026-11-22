@@ -11,6 +11,7 @@ internal static class ServerListings
 {
     internal const int MaxMounts = 384;
     internal static readonly Uri Soundmap = new("https://locusonus.org/soundmap/list/active/json/name");
+    private static readonly Uri GlobalCatalogueOrigin = new("https://media-ice.musicradio.com/");
     private const string IcecastStatus = "/status-json.xsl";
     private const string ShoutcastStatus = "/statistics";
     private const string ShoutcastQuery = "?json=1";
@@ -88,6 +89,9 @@ internal static class ServerListings
     {
         var listing = new Builder(page);
         bool icecastPage = document.Title?.Contains("Icecast", StringComparison.OrdinalIgnoreCase) == true;
+        // Global's HTTPS alias lists the same mounts using its canonical media-ice links.
+        var advertisedOrigin = page is { Scheme: "https", IsDefaultPort: true, IdnHost: "media-ssl.musicradio.com" }
+            ? GlobalCatalogueOrigin : null;
         foreach (var card in document.QuerySelectorAll(icecastPage ? ".stream-container, .roundcont" : ".stream-container"))
         {
             token.ThrowIfCancellationRequested();
@@ -115,13 +119,16 @@ internal static class ServerListings
                 }
             }
             if (!AudioType(mime) ||
-                (!legacy && (!PublicNetwork.TryUrl(direct ?? "", page, out var explicitUrl) || explicitUrl != url)) ||
-                !card.QuerySelectorAll("a[href]").Any(a =>
-                    PublicNetwork.TryUrl(a.GetAttribute("href") ?? "", page, out var playlist) &&
-                    playlist == new Uri(page, url.AbsolutePath + ".m3u"))) continue;
+                (!legacy && !MatchesLink(direct, url)) ||
+                !card.QuerySelectorAll("a[href]").Any(a => MatchesLink(a.GetAttribute("href"),
+                    new Uri(page, url.AbsolutePath + ".m3u")))) continue;
             if (!listing.Add(new ServerMount(url, name, Listeners: listeners))) break;
         }
         return listing.Result();
+
+        bool MatchesLink(string? link, Uri expected) =>
+            PublicNetwork.TryUrl(link ?? "", page, out var address) &&
+            (address == expected || (advertisedOrigin != null && address == new Uri(advertisedOrigin, expected.AbsolutePath)));
     }
 
     internal static Uri? LinkedIcecastStatus(IDocument document, Uri page)

@@ -26,6 +26,11 @@ dd { margin-bottom: .5rem; }
 </ul>
 </nav>
 <h2 id="changes">Version history</h2>
+<h3>1.2.10</h3>
+<ul>
+<li>Global's HTTPS stream directory now returns its full list, including Smooth Chill.</li>
+<li>Stream Details now has selectable rows. Search an address, copy it, open it in your browser, or scan its server without typing the address again.</li>
+</ul>
 <h3>1.2.9</h3>
 <ul>
 <li>Discover more streams on large server listings, including Global, Icecast and SHOUTcast. Find active microphones from the Locus Sonus soundmap.</li>
@@ -61,6 +66,7 @@ dd { margin-bottom: .5rem; }
 <p>Open the list in the address combo box to choose a recent search, then press Return in the field to search. StreamSift keeps the last ten successful searches, most recent first. Choose File, Clear Search History to remove them.</p>
 <h2 id="listen">Use a stream</h2>
 <p>In Streams, press Command+A to select all visible results or hold Shift while moving through the list to select a range. Saving or copying includes the full selection in list order. Stream Details shows the first selected stream when more than one is selected.</p>
+<p>In Stream Details (Command+3), use the arrow keys to choose a row. On <strong>Stream address</strong> or <strong>Found on</strong>, press Return to search that exact address or Option+Return to open it in your browser. Command+C copies the selected value without the label or extra punctuation. On Stream address, open its context menu with VoiceOver+Shift+M or a secondary click and choose <strong>Scan Stream Server</strong> to search the server root instead. The search keeps the original scheme and port.</p>
 <p><strong>Refresh Results:</strong> Press Command+R to repeat the last search using its original address or name and search command. The selection, format filter and sort order are kept where still available. Counts are fetched once during the refresh; there is no automatic polling.</p>
 <p>Press Command+L for <strong>Filter and Sort</strong>. Choose a format that occurs in the current results, or All formats. Sort by station name, bitrate, listener count when reported, or the original search order. Unreported values appear last in numeric orders. Listener counts are snapshots from the scan, not live counters. These choices reset when you start another search. Press Command+F to find text in the visible rows, then use Command+G or Command+Shift+G to continue forward or backward.</p>
 <ul>
