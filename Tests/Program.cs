@@ -422,7 +422,42 @@ Require(triton.Stations is [{ Name: "TESTFM", Format: "MP3" }] &&
         "https://edge.live.streamtheworld.com/TESTFM.mp3", tritonRoot + "TESTFMAAC.aac"]),
     "Only verify public advertised Triton mounts; keep the durable provider address, not a CDN edge.");
 
-const string directoryApi = "https://de1.api.radio-browser.info/json/stations/search?hidebroken=true&order=votes&reverse=true&limit=70000";
+const string tuneInPage = "https://tunein.com/radio/Test-FM-s12345/";
+const string tuneInApi = "https://opml.radiotime.com/Tune.ashx?id=s12345&partnerId=RadioTime&formats=mp3,aac,ogg,hls";
+handler.Text(tuneInPage, """<audio src="https://unrelated.example/page-player.mp3"></audio>""");
+handler.Text(tuneInApi, """
+    https://stream.tunein-fixture.example/live.mp3
+    http://127.0.0.1/private.mp3
+    https://promo.tunein-fixture.example/other.mp3?aw_0_1st.stationId=s999
+    https://stream.tunein-fixture.example/recording.mp3?aw_0_1st.stationId=s12345
+    """, "audio/x-mpegurl");
+handler.Audio("https://stream.tunein-fixture.example/live.mp3", mp3);
+handler.Audio("https://stream.tunein-fixture.example/recording.mp3?aw_0_1st.stationId=s12345", mp3, finite: true);
+int beforeTuneIn = handler.Seen.Count;
+var tuneIn = await engine.FindAsync(new Uri(tuneInPage), CancellationToken.None);
+Require(tuneIn.Stations is [{ Name: "Test FM", Format: "MP3" }] &&
+    tuneIn.Stations[0].Url.AbsoluteUri == "https://stream.tunein-fixture.example/live.mp3" &&
+    handler.Seen.Skip(beforeTuneIn).SequenceEqual([tuneInApi, "https://stream.tunein-fixture.example/live.mp3",
+        "https://stream.tunein-fixture.example/recording.mp3?aw_0_1st.stationId=s12345"]),
+    "Resolve a TuneIn station page through the public Tune service, verifying only this station's live public streams.");
+int beforeTuneInId = handler.Seen.Count;
+var tuneInId = await engine.FindAsync(new Uri("https://tunein.com/embed/player/s12345"), CancellationToken.None);
+Require(tuneInId.Stations is [{ Format: "MP3" }] && handler.Seen[beforeTuneInId] == tuneInApi,
+    "A TuneIn address that ends in a station id uses the same public Tune service.");
+const string tuneInMissing = "https://opml.radiotime.com/Tune.ashx?id=s99&partnerId=RadioTime&formats=mp3,aac,ogg,hls";
+handler.Text(tuneInMissing, """<?xml version="1.0"?><opml version="1"><head><status>404</status></head><body/></opml>""", "text/xml");
+handler.Text("https://tunein.com/radio/s99/", "<title>Unknown</title>");
+int beforeTuneInMissing = handler.Seen.Count;
+var tuneInUnknown = await engine.FindAsync(new Uri("https://tunein.com/radio/s99/"), CancellationToken.None);
+Require(tuneInUnknown.Stations.Count == 0 &&
+    handler.Seen.Skip(beforeTuneInMissing).SequenceEqual([tuneInMissing, "https://tunein.com/radio/s99/"]),
+    "An unknown TuneIn station lists nothing and falls back to the page itself.");
+int beforeTuneInLookalike = handler.Seen.Count;
+await engine.FindAsync(new Uri("https://tunein.com.unrelated.example/radio/Test-FM-s12345/"), CancellationToken.None);
+Require(handler.Seen.Skip(beforeTuneInLookalike).SequenceEqual(["https://tunein.com.unrelated.example/radio/Test-FM-s12345/"]),
+    "An unrelated host cannot trigger the TuneIn provider.");
+
+const string directoryApi ="https://de1.api.radio-browser.info/json/stations/search?hidebroken=true&order=votes&reverse=true&limit=70000";
 const string iprdApi = "https://iprd-org.github.io/iprd/site_data/metadata/catalog.json";
 const string directoryHome = "https://www.directory-fixture.example/news";
 handler.Text(directoryApi, """

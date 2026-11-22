@@ -30,6 +30,8 @@ internal static partial class Extraction
     private static partial Regex AppEntryFile();
     [GeneratedRegex("""\b(?:var|let|const)\s+streamSrcDB\s*=\s*['"]([^'"]{1,2048})['"]""", RegexOptions.None, 200)]
     private static partial Regex SecureNetStream();
+    [GeneratedRegex(@"^(?:(?<name>[^/]{1,200})-)?s(?<id>\d{2,12})$", RegexOptions.IgnoreCase, 200)]
+    private static partial Regex TuneInStationSegment();
 
     private const int MaxPageLinks = 100;
     private static readonly Uri SwedishRadioChannels = new("https://api.sr.se/api/v2/channels?format=json&pagination=false");
@@ -37,6 +39,8 @@ internal static partial class Extraction
     private const string TritonProvisioning = "/api/livestream";
     private const string TritonRedirect = "/api/livestream-redirect/";
     private static readonly XNamespace TritonSchema = "http://provisioning.streamtheworld.com/player/livestream-1.9";
+    private const string TuneInHost = "opml.radiotime.com";
+    private const string TuneInTune = "/Tune.ashx";
     internal sealed record Extracted(bool LiveHls, bool IsDirectory, List<Link> Links, ServerListing? Server);
 
     internal static Uri? OfficialCatalogue(Uri page)
@@ -48,6 +52,7 @@ internal static partial class Extraction
 
     internal static Link? PublicPlayerSource(Uri page)
     {
+        if (TuneInStation(page) is Link tuneIn) return tuneIn;
         if (page.IdnHost != "radio.garden" || !page.IsDefaultPort) return null;
         string[] path = page.AbsolutePath.Trim('/').Split('/');
         if (path is not ["listen", { Length: > 0 } slug, { Length: 8 } id] ||
@@ -55,6 +60,21 @@ internal static partial class Extraction
         var audio = new Uri($"https://radio.garden/api/ara/content/listen/{id}/channel.mp3");
         return new Link(audio, page, LinkKind.Audio, Label(Uri.UnescapeDataString(slug).Replace('-', ' ')), true);
     }
+
+    // Approach adapted from QUILL Radio (Community-Access/quill, MIT).
+    // A TuneIn station page ends in its guide id, which TuneIn's public OPML Tune service resolves to stream addresses.
+    private static Link? TuneInStation(Uri page)
+    {
+        if (!page.IsDefaultPort || !HostIs(page, "tunein.com")) return null;
+        var segment = Uri.UnescapeDataString(page.AbsolutePath.TrimEnd('/').Split('/')[^1]);
+        var match = TuneInStationSegment().Match(segment);
+        if (!match.Success) return null;
+        var tune = new Uri($"https://{TuneInHost}{TuneInTune}?id=s{match.Groups["id"].Value}&partnerId=RadioTime&formats=mp3,aac,ogg,hls");
+        return new Link(tune, page, LinkKind.DedicatedPlayer, Label(match.Groups["name"].Value.Replace('-', ' ')));
+    }
+
+    private static bool IsTuneInTune(Uri uri) =>
+        uri.Scheme == "https" && uri.IsDefaultPort && uri.IdnHost == TuneInHost && uri.AbsolutePath == TuneInTune;
 
     internal static Extracted Read(string text, string mime, Uri page, Link source, Uri site, CancellationToken token)
     {
@@ -73,6 +93,8 @@ internal static partial class Extraction
             else if (page.Scheme == "https" && page.IsDefaultPort && page.IdnHost == TritonHost &&
                      page.AbsolutePath == TritonProvisioning)
                 TritonMounts(trim);
+            else if (IsTuneInTune(page))
+                TuneInStreams(trim);
             else if (trim.StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase) ||
                 HasExtension(page, ".m3u", ".m3u8") && !trim.StartsWith('<'))
                 M3u(trim);
@@ -351,6 +373,25 @@ internal static partial class Extraction
                     Add($"https://{TritonHost}{TritonRedirect}{name}{extension}", LinkKind.Audio,
                         source.Name ?? name, true, nameOrigin: NameOrigin.Directory, keepAddress: true);
             }
+        }
+
+        void TuneInStreams(string body)
+        {
+            // The Tune service answers with one address per line, or an OPML error document for an unknown station.
+            var station = QueryValue(page, "id");
+            foreach (var line in body.Split('\n').Select(line => line.Trim()).Where(line => line.Length > 0 && !line.StartsWith('#')).Take(12))
+            {
+                // Some answers include another station's promotional stream, labelled with its own guide id.
+                if (!PublicNetwork.TryUrl(line, null, out var uri) || uri.Query.TrimStart('?').Split('&').Any(field =>
+                    field.Split('=', 2) is [var key, var value] &&
+                    Uri.UnescapeDataString(key).EndsWith("stationId", StringComparison.OrdinalIgnoreCase) &&
+                    !Uri.UnescapeDataString(value).Equals(station, StringComparison.OrdinalIgnoreCase))) continue;
+                Candidate(line, source.Name, true);
+            }
+
+            static string? QueryValue(Uri address, string name) => address.Query.TrimStart('?').Split('&')
+                .Select(field => field.Split('=', 2)).Where(field => field.Length == 2 && field[0] == name)
+                .Select(field => Uri.UnescapeDataString(field[1])).FirstOrDefault();
         }
 
         void ReadPlayerSources(JsonElement values, string? title, bool requirePublicFlag)
