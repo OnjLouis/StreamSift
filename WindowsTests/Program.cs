@@ -61,6 +61,12 @@ Check(Preferences.Load(prefsFolder) == settings && !Directory.Exists(exportFolde
 (settings with { SearchSounds = false }).Save(prefsFolder);
 Check(Preferences.Load(prefsFolder) == (settings with { SearchSounds = false }) &&
     !Directory.EnumerateFiles(prefsFolder, "*.tmp").Any(), "Settings can be replaced without keeping temporary files.");
+var unpluggedPlayer = settings with { PlayerPath = Path.Combine(directory, "unplugged", "FastPlay.exe") };
+unpluggedPlayer.Save(prefsFolder);
+Check(Preferences.Load(prefsFolder) == unpluggedPlayer, "A custom player survives reopening, even when its drive is not connected.");
+File.WriteAllText(prefsFile, """{"SearchSounds":false,"PlayerPath":"C:\\Windows\\notepad.exe"}""");
+Check(Preferences.Load(prefsFolder) is { SearchSounds: false, PlayerPath: null },
+    "An unsupported saved custom player is ignored without resetting other preferences.");
 foreach (var invalid in new[] { @"relative\files", @"\\.\C:\files" })
 {
     try
@@ -177,6 +183,26 @@ Check(StreamPreview.ResolvePlayer(PlayerChoice.Foobar2000, portableFoobar, [])?.
 Check(StreamPreview.ResolvePlayer(PlayerChoice.Automatic, fastPlayPath, [playerRoot])?.Kind == PlayerChoice.FastPlay &&
     StreamPreview.ResolvePlayer(PlayerChoice.FastPlay, portableFoobar, [playerRoot])?.Executable == fastPlayPath,
     "Automatic honors a FastPlay association and an explicit choice uses its installed copy.");
+var portableVlc = Path.Combine(directory, "portable", "vlc.exe");
+File.WriteAllText(portableVlc, "");
+Check(StreamPreview.ResolvePlayer(PlayerChoice.Automatic, foobarPath, [playerRoot], portableVlc)?.Executable == portableVlc &&
+    StreamPreview.ResolvePlayer(PlayerChoice.Vlc, null, [], portableVlc)?.Executable == portableVlc &&
+    StreamPreview.ResolvePlayer(PlayerChoice.Foobar2000, null, [playerRoot], portableVlc)?.Executable == foobarPath,
+    "A custom player is used first when Media player is Automatic or the same player.");
+Check(StreamPreview.ResolveFoobar(portableFoobar, [playerRoot]) == portableFoobar &&
+    StreamPreview.ResolveFoobar(portableVlc, [playerRoot]) == foobarPath && StreamPreview.ResolveFoobar(null, []) == null,
+    "Add to Foobar2000 uses a chosen portable Foobar2000 before Program Files.");
+Check(Preferences.NormalizePlayer(" ") == null && Preferences.NormalizePlayer($" \"{portableFoobar}\" ") == portableFoobar,
+    "A blank custom player looks in the usual places; a pasted quoted path is accepted.");
+foreach (var invalid in new[] { otherPlayer, @"relative\vlc.exe", Path.Combine(directory, "missing", "vlc.exe"), @"\\.\C:\vlc.exe" })
+{
+    try
+    {
+        Preferences.NormalizePlayer(invalid);
+        throw new InvalidOperationException("An unsupported or missing custom player was accepted.");
+    }
+    catch (ArgumentException) { count++; }
+}
 var fastPlay = new StreamPreview.Player(fastPlayPath, PlayerChoice.FastPlay);
 Reject(() => StreamPreview.Command(fastPlay, station), "FastPlay was given a raw URL.");
 Check(StreamPreview.Command(fastPlay, station, handoff).ArgumentList.SequenceEqual([handoff]),

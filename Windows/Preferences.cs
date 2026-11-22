@@ -3,7 +3,8 @@ using System.Text.Json;
 namespace StreamSift;
 
 internal sealed record Preferences(bool SearchSounds = true, bool CheckUpdatesAtStartup = false,
-    string? PlaylistFolder = null, bool AutomaticFallback = false, PlayerChoice MediaPlayer = PlayerChoice.Automatic)
+    string? PlaylistFolder = null, bool AutomaticFallback = false, PlayerChoice MediaPlayer = PlayerChoice.Automatic,
+    string? PlayerPath = null)
 {
     internal static string UserDirectory => Path.Combine(AppContext.BaseDirectory, "User");
     internal static string DefaultPlaylistFolder => Path.Combine(UserDirectory, "Playlists");
@@ -22,7 +23,10 @@ internal sealed record Preferences(bool SearchSounds = true, bool CheckUpdatesAt
             return saved == null ? fallback : saved with
             {
                 PlaylistFolder = NormalizeFolder(saved.PlaylistFolder),
-                MediaPlayer = Enum.IsDefined(saved.MediaPlayer) ? saved.MediaPlayer : PlayerChoice.Automatic
+                MediaPlayer = Enum.IsDefined(saved.MediaPlayer) ? saved.MediaPlayer : PlayerChoice.Automatic,
+                // A portable player can be on a drive that is not connected yet, so only its name is checked here.
+                PlayerPath = saved.PlayerPath is string player && Path.IsPathFullyQualified(player) &&
+                    !player.Any(char.IsControl) && StreamPreview.KindOf(player) != null ? player : null
             };
         }
         catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
@@ -39,6 +43,17 @@ internal sealed record Preferences(bool SearchSounds = true, bool CheckUpdatesAt
             folder.StartsWith(@"\\?\", StringComparison.Ordinal) || folder.StartsWith(@"\\.\", StringComparison.Ordinal))
             throw new ArgumentException("Enter a full playlist folder path or choose Browse.");
         return Path.GetFullPath(folder);
+    }
+
+    internal static string? NormalizePlayer(string? player)
+    {
+        if (string.IsNullOrWhiteSpace(player)) return null;
+        player = player.Trim().Trim('"');
+        if (!Path.IsPathFullyQualified(player) || player.Any(char.IsControl) ||
+            player.StartsWith(@"\\?\", StringComparison.Ordinal) || player.StartsWith(@"\\.\", StringComparison.Ordinal) ||
+            StreamPreview.Supported(Path.GetFullPath(player)) is not StreamPreview.Player chosen)
+            throw new ArgumentException("Choose vlc.exe, foobar2000.exe or FastPlay.exe, or leave the custom player blank.");
+        return chosen.Executable;
     }
 
     internal void Save(string directory)

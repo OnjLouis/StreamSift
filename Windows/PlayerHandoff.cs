@@ -21,21 +21,30 @@ internal static class StreamPreview
         _ => "Automatic"
     };
 
-    internal static Player? FindPlayer(PlayerChoice choice)
+    internal static Player? FindPlayer(PlayerChoice choice, string? custom = null)
     {
         const uint associatedExecutable = 2;
         var associated = new StringBuilder(4096);
         uint length = (uint)associated.Capacity;
         string? association = AssocQueryString(0, associatedExecutable, ".m3u8", null, associated, ref length) == 0
             ? associated.ToString() : null;
-        var roots = new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86) }.Where(root => root.Length != 0).Distinct();
-        return ResolvePlayer(choice, association, roots);
+        return ResolvePlayer(choice, association, ProgramRoots(), custom);
     }
 
-    internal static Player? ResolvePlayer(PlayerChoice choice, string? association, IEnumerable<string> roots)
+    private static IEnumerable<string> ProgramRoots() => new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+        Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86) }.Where(root => root.Length != 0).Distinct();
+
+    internal static string? FindFoobar(string? custom) => ResolveFoobar(custom, ProgramRoots());
+
+    internal static string? ResolveFoobar(string? custom, IEnumerable<string> roots) =>
+        custom != null && Supported(custom) is { Kind: PlayerChoice.Foobar2000 } chosen ? chosen.Executable :
+        roots.Select(root => Path.Combine(root, "foobar2000", "foobar2000.exe")).FirstOrDefault(File.Exists);
+
+    internal static Player? ResolvePlayer(PlayerChoice choice, string? association, IEnumerable<string> roots, string? custom = null)
     {
         bool Matches(PlayerChoice kind) => choice == PlayerChoice.Automatic || choice == kind;
+        // A player chosen in Preferences covers portable copies outside Program Files.
+        if (custom != null && Supported(custom) is Player chosen && Matches(chosen.Kind)) return chosen;
         if (association != null && Supported(association) is Player preferred && Matches(preferred.Kind)) return preferred;
 
         (PlayerChoice Kind, string Relative)[] candidates =
@@ -54,17 +63,19 @@ internal static class StreamPreview
         return null;
     }
 
-    private static Player? Supported(string path)
+    internal static Player? Supported(string path)
     {
         if (!Path.IsPathFullyQualified(path) || !File.Exists(path)) return null;
-        return Path.GetFileName(path).ToLowerInvariant() switch
-        {
-            "vlc.exe" => new Player(path, PlayerChoice.Vlc),
-            "foobar2000.exe" => new Player(path, PlayerChoice.Foobar2000),
-            "fastplay.exe" => new Player(path, PlayerChoice.FastPlay),
-            _ => null
-        };
+        return KindOf(path) is PlayerChoice kind ? new Player(path, kind) : null;
     }
+
+    internal static PlayerChoice? KindOf(string path) => Path.GetFileName(path).ToLowerInvariant() switch
+    {
+        "vlc.exe" => PlayerChoice.Vlc,
+        "foobar2000.exe" => PlayerChoice.Foobar2000,
+        "fastplay.exe" => PlayerChoice.FastPlay,
+        _ => null
+    };
 
     internal static ProcessStartInfo Command(Player player, Station station, string? preparedPlaylist = null)
     {

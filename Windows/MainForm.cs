@@ -686,12 +686,12 @@ internal sealed class MainForm : Form
         }
         if (Selected is not Station item) return;
         var choice = preferences.MediaPlayer;
-        var player = StreamPreview.FindPlayer(choice);
+        var player = StreamPreview.FindPlayer(choice, preferences.PlayerPath);
         if (player == null)
         {
             ShowText(StreamList.PlayLabel, choice == PlayerChoice.Automatic
-                ? "VLC, Foobar2000 and FastPlay were not found. Install one of these players, or press Shift+Enter to save and open a playlist in your default player."
-                : StreamPreview.DisplayName(choice) + " was not found. Choose another media player in Preferences, or press Shift+Enter to open a saved playlist in your default player.");
+                ? "VLC, Foobar2000 and FastPlay were not found. Install one of these players, choose a custom player file in Preferences, or press Shift+Enter to save and open a playlist in your default player."
+                : StreamPreview.DisplayName(choice) + " was not found. Choose another media player or a custom player file in Preferences, or press Shift+Enter to open a saved playlist in your default player.");
             return;
         }
         SafeAction(() =>
@@ -753,12 +753,10 @@ internal sealed class MainForm : Form
     {
         var stations = SelectedStreams();
         if (stations.Length == 0) return;
-        var executable = new[] { Environment.SpecialFolder.ProgramFiles, Environment.SpecialFolder.ProgramFilesX86 }
-            .Select(root => Path.Combine(Environment.GetFolderPath(root), "foobar2000", "foobar2000.exe"))
-            .FirstOrDefault(File.Exists);
+        var executable = StreamPreview.FindFoobar(preferences.PlayerPath);
         if (executable == null)
         {
-            ShowText("Foobar2000", "Foobar2000 was not found in Program Files. Copy the stream address or save the playlist to open it in your player.");
+            ShowText("Foobar2000", "Foobar2000 was not found in Program Files. Choose its foobar2000.exe as the custom player file in Preferences, or copy the stream address or save the playlist to open it in your player.");
             return;
         }
         SafeAction(() =>
@@ -854,7 +852,8 @@ internal sealed class MainForm : Form
             StreamList.OpensDefaultPlayer(Keys.Shift | Keys.Enter) && !StreamList.OpensMenu(Keys.Shift | Keys.Enter) &&
             !StreamList.PreviewsStream(Keys.Shift | Keys.Enter) && previewCommand.Text == "Play stream" &&
             previewCommand.ShortcutKeyDisplayString == "Enter";
-        using var preferencesFixture = new PreferencesDialog(new Preferences(MediaPlayer: PlayerChoice.Foobar2000), () => { });
+        using var preferencesFixture = new PreferencesDialog(new Preferences(MediaPlayer: PlayerChoice.Foobar2000,
+            PlayerPath: @"D:\Portable\foobar2000\foobar2000.exe"), () => { });
         ok &= preferencesFixture.CheckControls();
         using var filterFixture = ResultDialog.Filter(["AAC", "MP3"], true, new ResultView("MP3"), () => { }, out var readFilter);
         var filterFields = filterFixture.Controls[0].Controls.OfType<ComboBox>().ToArray();
