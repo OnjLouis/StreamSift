@@ -41,6 +41,8 @@ internal sealed class MainForm : Form
     private bool waitForScanOnClose;
     private bool closeAfterScan;
     private string? settledAnnouncement;
+    private bool skipSettledAnnouncement;
+    private System.Windows.Forms.Timer? settleTimer;
 
     internal MainForm(bool readHistory = true)
     {
@@ -183,7 +185,7 @@ internal sealed class MainForm : Form
             scan?.Cancel();
             startupUpdate?.Cancel();
         };
-        Disposed += (_, _) => { sounds.Dispose(); client.Dispose(); handoffs.Dispose(); };
+        Disposed += (_, _) => { sounds.Dispose(); client.Dispose(); handoffs.Dispose(); settleTimer?.Dispose(); };
         RefreshHistory();
         UpdateSelection();
         SetStatus("Ready.");
@@ -350,15 +352,18 @@ internal sealed class MainForm : Form
                 browserCommand.Enabled = true;
                 directoryCommand.Enabled = true;
                 UpdateSelection();
+                bool movedToStatus = false;
                 if (focus)
                 {
                     var destination = focusResults ? (Control)results : status;
                     ActiveControl = destination;
                     if (ContainsFocus) destination.Focus();
+                    movedToStatus = destination == status;
                 }
                 cancel.Enabled = false;
                 if (pendingUpdateNotice) SetStatus(status.Text, announce: false);
-                AnnounceWhenSettled();
+                // Status reads its own text when it receives focus.
+                AnnounceWhenSettled(movedToStatus);
                 if (closeAfterScan) BeginInvoke(new Action(Close));
             }
         }
@@ -640,27 +645,33 @@ internal sealed class MainForm : Form
         if (announce) Announce(message);
     }
 
-    private void Announce(string message)
+    private void Announce(string message, AutomationNotificationKind kind = AutomationNotificationKind.Other,
+        AutomationNotificationProcessing processing = AutomationNotificationProcessing.MostRecent, bool inStatus = false)
     {
-        if (ContainsFocus && !status.Focused)
-            status.AccessibilityObject.RaiseAutomationNotification(AutomationNotificationKind.Other,
-                AutomationNotificationProcessing.MostRecent, message);
+        if (ContainsFocus && (inStatus || !status.Focused))
+            status.AccessibilityObject.RaiseAutomationNotification(kind, processing, message);
     }
 
     // Approach adapted from QUILL Radio (Community-Access/quill, MIT).
-    // Moving focus at the end of a search can cut off a notification raised before it, so announce once focus settles.
-    private void AnnounceWhenSettled()
+    // Moving focus at the end of a search can cut off a notification raised before it, so announce shortly after
+    // the new focus has been reported. All lets the screen reader finish reading the focused item first.
+    private void AnnounceWhenSettled(bool movedToStatus)
     {
         if (!IsHandleCreated) return;
-        bool queued = settledAnnouncement != null;
         settledAnnouncement = status.Text;
-        if (queued) return;
-        BeginInvoke(new Action(() =>
+        skipSettledAnnouncement = movedToStatus;
+        if (settleTimer != null) return;
+        settleTimer = new System.Windows.Forms.Timer { Interval = 250 };
+        settleTimer.Tick += (_, _) =>
         {
+            settleTimer?.Dispose();
+            settleTimer = null;
             var message = settledAnnouncement;
             settledAnnouncement = null;
-            if (!closing && message == status.Text) Announce(message);
-        }));
+            if (!closing && !skipSettledAnnouncement && message == status.Text)
+                Announce(message, AutomationNotificationKind.ActionCompleted, AutomationNotificationProcessing.All, inStatus: true);
+        };
+        settleTimer.Start();
     }
 
     private void Copy()
@@ -916,11 +927,13 @@ internal sealed class MainForm : Form
         _ = details.Handle;
         _ = Handle;
         SetStatus("Fixture search finished.", announce: false);
-        AnnounceWhenSettled();
-        AnnounceWhenSettled();
-        ok &= status.Text == "Fixture search finished." && settledAnnouncement == status.Text;
+        AnnounceWhenSettled(movedToStatus: false);
+        AnnounceWhenSettled(movedToStatus: false);
         Application.DoEvents();
-        ok &= settledAnnouncement == null;
+        ok &= status.Text == "Fixture search finished." && settledAnnouncement == status.Text && settleTimer != null;
+        for (var wait = Stopwatch.StartNew(); settledAnnouncement != null && wait.ElapsedMilliseconds < 3000; Thread.Sleep(20))
+            Application.DoEvents();
+        ok &= settledAnnouncement == null && settleTimer == null;
         var row = results.Items.Add(ResultRow(a, a.Name));
         ok &= results.Columns.Count == 1 && row.SubItems.Count == 1 && row.Text == "Theme, MP3, 192 kbps" &&
             ResultRow(a with { Bitrate = null }, a.Name).Text == "Theme, MP3" &&
