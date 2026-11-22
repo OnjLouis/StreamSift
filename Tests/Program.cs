@@ -87,6 +87,7 @@ void Require(bool condition, string message)
     if (!condition) throw new Exception(message);
     checks++;
 }
+static Task<IReadOnlyList<string?>> NoMirrors(CancellationToken _) => Task.FromResult<IReadOnlyList<string?>>([]);
 
 var fallbackUri = new Uri("https://radio.example/live");
 var fallbackHit = new SearchResult([new Station("Verified", fallbackUri, "MP3", 128, fallbackUri, false)], 2, 0, false);
@@ -451,7 +452,7 @@ handler.Text(iprdApi, """
 var directoryCache = Directory.CreateTempSubdirectory("streamsift-directory-test-");
 try
 {
-    var lookup = new DirectoryDiscovery(fixtureClient, directoryCache.FullName);
+    var lookup = new DirectoryDiscovery(fixtureClient, directoryCache.FullName) { FindMirrors = NoMirrors };
     int beforeDirectory = handler.Seen.Count;
     var listed = await lookup.FindAsync(new Uri(directoryHome), CancellationToken.None);
     Require(listed.Stations is [{ Name: "Named local news", Format: "MP3" }] &&
@@ -521,12 +522,45 @@ handler.Text(directoryMirror,
 var mirrorCache = Directory.CreateTempSubdirectory("streamsift-directory-test-");
 try
 {
-    var viaMirror = await new DirectoryDiscovery(fixtureClient, mirrorCache.FullName)
+    var viaMirror = await new DirectoryDiscovery(fixtureClient, mirrorCache.FullName) { FindMirrors = NoMirrors }
         .FindAsync(new Uri(directoryHome), CancellationToken.None);
     Require(viaMirror.Stations is [{ Name: "Mirror station" }] && handler.Seen.Contains(directoryMirror),
         "Retry a failing directory server on its public mirror.");
 }
 finally { mirrorCache.Delete(recursive: true); }
+
+Require(DirectoryDiscovery.MirrorOrder([], new Random(1)).SequenceEqual(["de1.api.radio-browser.info", "de2.api.radio-browser.info"]),
+    "Without discovered servers, try the long-standing Radio Browser servers in order.");
+var mirrorOrder = DirectoryDiscovery.MirrorOrder(["fi1.api.radio-browser.info.", "DE2.api.radio-browser.info", null, "evil.example",
+    "at1.api.radio-browser.info.evil.example", "a.b.api.radio-browser.info", "api.radio-browser.info", "fi1.api.radio-browser.info"], new Random(1));
+Require(mirrorOrder.Count == 3 && mirrorOrder.Take(2).ToHashSet().SetEquals(["fi1.api.radio-browser.info", "de2.api.radio-browser.info"]) &&
+    mirrorOrder[2] == "de1.api.radio-browser.info",
+    "Keep only discovered Radio Browser server names, without duplicates, ahead of the fallback servers.");
+var discoveredApi = new UriBuilder(directoryApi) { Host = "fi1.api.radio-browser.info" }.Uri.AbsoluteUri;
+handler.Text(discoveredApi,
+    """[{"homepage":"https://www.directory-fixture.example/news","name":"Discovered server station","url":"https://radio.example/main-mount"}]""",
+    "application/json");
+var discoveredCache = Directory.CreateTempSubdirectory("streamsift-directory-test-");
+try
+{
+    int beforeDiscovered = handler.Seen.Count;
+    var viaDiscovered = await new DirectoryDiscovery(fixtureClient, discoveredCache.FullName)
+        { FindMirrors = _ => Task.FromResult<IReadOnlyList<string?>>(["fi1.api.radio-browser.info"]) }
+        .FindAsync(new Uri(directoryHome), CancellationToken.None);
+    Require(viaDiscovered.Stations is [{ Name: "Discovered server station" }] && handler.Seen[beforeDiscovered] == discoveredApi &&
+        !handler.Seen.Skip(beforeDiscovered).Contains(directoryApi),
+        "Use a discovered Radio Browser server before the fixed fallback servers.");
+    handler.Fail(discoveredApi, HttpStatusCode.ServiceUnavailable);
+    File.Delete(Path.Combine(discoveredCache.FullName, "radio-browser-v1.json.gz"));
+    int beforeDiscoveredDown = handler.Seen.Count;
+    var discoveredDown = await new DirectoryDiscovery(fixtureClient, discoveredCache.FullName)
+        { FindMirrors = _ => Task.FromResult<IReadOnlyList<string?>>(["fi1.api.radio-browser.info"]) }
+        .FindAsync(new Uri(directoryHome), CancellationToken.None);
+    Require(discoveredDown.Stations is [{ Name: "Mirror station" }] &&
+        handler.Seen.Skip(beforeDiscoveredDown).Take(3).SequenceEqual([discoveredApi, directoryApi, directoryMirror]),
+        "Fall back to de1 and then de2 when every discovered server fails.");
+}
+finally { discoveredCache.Delete(recursive: true); }
 
 const string srPage = "https://www.sverigesradio.se/kanaler";
 const string srCatalogue = "https://api.sr.se/api/v2/channels?format=json&pagination=false";
