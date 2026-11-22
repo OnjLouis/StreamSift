@@ -40,6 +40,7 @@ internal sealed class MainForm : Form
     private bool closing;
     private bool waitForScanOnClose;
     private bool closeAfterScan;
+    private string? settledAnnouncement;
 
     internal MainForm(bool readHistory = true)
     {
@@ -317,12 +318,12 @@ internal sealed class MainForm : Form
                 (refreshing && resultView.Format != null ? $" Showing {visibleResults.Length} {resultView.Format} streams." : "") +
                 (refreshing && previousFormat != null && resultView.Format == null && found.Stations.Count != 0
                     ? $" {previousFormat} is no longer available. Showing all formats." : "") +
-                (historyNotSaved ? " Recent searches could not be saved." : ""));
+                (historyNotSaved ? " Recent searches could not be saved." : ""), announce: false);
             sounds.SearchCompleted();
         }
         catch (OperationCanceledException) when (operation.IsCancellationRequested)
         {
-            if (!closing) SetStatus(refreshing && focusResults ? "Refresh cancelled. Previous results kept." : "Search cancelled.");
+            if (!closing) SetStatus(refreshing && focusResults ? "Refresh cancelled. Previous results kept." : "Search cancelled.", announce: false);
         }
         catch (Exception e) when (e is OperationCanceledException or HttpRequestException or IOException or InvalidOperationException or
             System.ComponentModel.Win32Exception or System.Text.Json.JsonException or UnauthorizedAccessException)
@@ -332,7 +333,7 @@ internal sealed class MainForm : Form
                 SearchMethod.Browser => "Browser-assisted search could not finish.",
                 SearchMethod.Directory => "Public directory lookup could not finish.",
                 _ => "Search could not finish. Try the station's player page."
-            });
+            }, announce: false);
         }
         finally
         {
@@ -356,7 +357,8 @@ internal sealed class MainForm : Form
                     if (ContainsFocus) destination.Focus();
                 }
                 cancel.Enabled = false;
-                if (pendingUpdateNotice) SetStatus(status.Text);
+                if (pendingUpdateNotice) SetStatus(status.Text, announce: false);
+                AnnounceWhenSettled();
                 if (closeAfterScan) BeginInvoke(new Action(Close));
             }
         }
@@ -624,7 +626,7 @@ internal sealed class MainForm : Form
         SetStatus("Ready.");
     }
 
-    private void SetStatus(string message)
+    private void SetStatus(string message, bool announce = true)
     {
         if (pendingUpdateNotice && scan == null && updateCheck == null)
         {
@@ -635,9 +637,30 @@ internal sealed class MainForm : Form
         if (status.Text == message) return;
         status.Text = message;
         status.Select(0, 0);
+        if (announce) Announce(message);
+    }
+
+    private void Announce(string message)
+    {
         if (ContainsFocus && !status.Focused)
             status.AccessibilityObject.RaiseAutomationNotification(AutomationNotificationKind.Other,
                 AutomationNotificationProcessing.MostRecent, message);
+    }
+
+    // Approach adapted from QUILL Radio (Community-Access/quill, MIT).
+    // Moving focus at the end of a search can cut off a notification raised before it, so announce once focus settles.
+    private void AnnounceWhenSettled()
+    {
+        if (!IsHandleCreated) return;
+        bool queued = settledAnnouncement != null;
+        settledAnnouncement = status.Text;
+        if (queued) return;
+        BeginInvoke(new Action(() =>
+        {
+            var message = settledAnnouncement;
+            settledAnnouncement = null;
+            if (!closing && message == status.Text) Announce(message);
+        }));
     }
 
     private void Copy()
@@ -889,6 +912,13 @@ internal sealed class MainForm : Form
         ok &= !results.TabStop && !details.TabStop && status.TabStop && !streamsCommand.Enabled && !detailsCommand.Enabled;
         _ = results.Handle;
         _ = details.Handle;
+        _ = Handle;
+        SetStatus("Fixture search finished.", announce: false);
+        AnnounceWhenSettled();
+        AnnounceWhenSettled();
+        ok &= status.Text == "Fixture search finished." && settledAnnouncement == status.Text;
+        Application.DoEvents();
+        ok &= settledAnnouncement == null;
         var row = results.Items.Add(ResultRow(a, a.Name));
         ok &= results.Columns.Count == 1 && row.SubItems.Count == 1 && row.Text == "Theme, MP3, 192 kbps" &&
             ResultRow(a with { Bitrate = null }, a.Name).Text == "Theme, MP3" &&
