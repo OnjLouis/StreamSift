@@ -779,7 +779,9 @@ internal sealed class MainForm : Form
         var executable = StreamPreview.FindFoobar(preferences.PlayerPath);
         if (executable == null)
         {
-            ShowText("Foobar2000", "Foobar2000 was not found in Program Files. Choose its foobar2000.exe as the custom player file in Preferences, or copy the stream address or save the playlist to open it in your player.");
+            bool customFoobar = preferences.PlayerPath is string custom && StreamPreview.KindOf(custom) == PlayerChoice.Foobar2000;
+            ShowText("Foobar2000", (customFoobar ? "Foobar2000 was not found." : "Foobar2000 was not found in Program Files.") +
+                " Choose its foobar2000.exe as the custom player file in Preferences, or copy the stream address or save the playlist to open it in your player.");
             return;
         }
         SafeAction(() =>

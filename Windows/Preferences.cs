@@ -50,9 +50,13 @@ internal sealed record Preferences(bool SearchSounds = true, bool CheckUpdatesAt
         if (string.IsNullOrWhiteSpace(player)) return null;
         player = player.Trim().Trim('"');
         if (!Path.IsPathFullyQualified(player) || player.Any(char.IsControl) ||
-            player.StartsWith(@"\\?\", StringComparison.Ordinal) || player.StartsWith(@"\\.\", StringComparison.Ordinal) ||
-            StreamPreview.Supported(Path.GetFullPath(player)) is not StreamPreview.Player chosen)
-            throw new ArgumentException("Choose vlc.exe, foobar2000.exe or FastPlay.exe, or leave the custom player blank.");
+            player.StartsWith(@"\\?\", StringComparison.Ordinal) || player.StartsWith(@"\\.\", StringComparison.Ordinal))
+            throw new ArgumentException("Enter the full path, including the drive letter, or use Choose player.");
+        player = Path.GetFullPath(player);
+        if (StreamPreview.KindOf(player) == null)
+            throw new ArgumentException("Custom player file must be vlc.exe, foobar2000.exe or FastPlay.exe. Leave it blank to look in the usual places.");
+        if (StreamPreview.Supported(player) is not StreamPreview.Player chosen)
+            throw new ArgumentException(player + " was not found. Connect its drive, choose the file again, or leave Custom player file blank.");
         return chosen.Executable;
     }
 

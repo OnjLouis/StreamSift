@@ -194,15 +194,29 @@ Check(StreamPreview.ResolveFoobar(portableFoobar, [playerRoot]) == portableFooba
     "Add to Foobar2000 uses a chosen portable Foobar2000 before Program Files.");
 Check(Preferences.NormalizePlayer(" ") == null && Preferences.NormalizePlayer($" \"{portableFoobar}\" ") == portableFoobar,
     "A blank custom player looks in the usual places; a pasted quoted path is accepted.");
-foreach (var invalid in new[] { otherPlayer, @"relative\vlc.exe", Path.Combine(directory, "missing", "vlc.exe"), @"\\.\C:\vlc.exe" })
+var missingPlayer = Path.Combine(directory, "missing", "vlc.exe");
+foreach (var (invalid, reason) in new[] { (otherPlayer, "must be vlc.exe"), (@"relative\vlc.exe", "full path"),
+    (missingPlayer, missingPlayer + " was not found."), (@"\\.\C:\vlc.exe", "full path") })
 {
     try
     {
         Preferences.NormalizePlayer(invalid);
         throw new InvalidOperationException("An unsupported or missing custom player was accepted.");
     }
-    catch (ArgumentException) { count++; }
+    catch (ArgumentException e) when (e.Message.Contains(reason, StringComparison.Ordinal)) { count++; }
 }
+string? keptPlayer = null;
+var dialogThread = new Thread(() =>
+{
+    // A saved player on a drive that is not connected must not block saving other preferences.
+    using var dialog = new PreferencesDialog(new Preferences(PlayerPath: missingPlayer), () => { });
+    dialog.Commit();
+    if (dialog.DialogResult == DialogResult.OK) keptPlayer = dialog.Value.PlayerPath;
+});
+dialogThread.SetApartmentState(ApartmentState.STA);
+dialogThread.Start();
+dialogThread.Join();
+Check(keptPlayer == missingPlayer, "Preferences save with an unchanged custom player whose drive is not connected.");
 var fastPlay = new StreamPreview.Player(fastPlayPath, PlayerChoice.FastPlay);
 Reject(() => StreamPreview.Command(fastPlay, station), "FastPlay was given a raw URL.");
 Check(StreamPreview.Command(fastPlay, station, handoff).ArgumentList.SequenceEqual([handoff]),

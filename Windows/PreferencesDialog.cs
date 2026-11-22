@@ -106,14 +106,19 @@ internal sealed class PreferencesDialog : Form
                 InitialDirectory = Path.IsPathFullyQualified(chosen) && Path.GetDirectoryName(chosen) is string parent &&
                     Directory.Exists(parent) ? parent : ""
             };
-            if (picker.ShowDialog(this) == DialogResult.OK) playerPath.Text = picker.FileName;
+            if (picker.ShowDialog(this) != DialogResult.OK) return;
+            playerPath.Text = picker.FileName;
+            playerPath.Focus();
         };
     }
 
-    private void Commit()
+    internal void Commit()
     {
         string? customPlayer;
-        try { customPlayer = Preferences.NormalizePlayer(playerPath.Text); }
+        // A saved portable player may be on a drive that is not connected now; keep it unless it was changed.
+        var typedPlayer = playerPath.Text.Trim().Trim('"');
+        try { customPlayer = Value.PlayerPath != null && typedPlayer.Equals(Value.PlayerPath, StringComparison.OrdinalIgnoreCase)
+            ? Value.PlayerPath : Preferences.NormalizePlayer(playerPath.Text); }
         catch (Exception e) when (e is ArgumentException or NotSupportedException or IOException)
         {
             Reject("Custom player", e.Message, playerPath);
@@ -148,7 +153,7 @@ internal sealed class PreferencesDialog : Form
         string text = sounds.Focused ? "Play a sound when a search starts and another when it finishes." :
             fallback.Focused ? "If the chosen method finds no playable stream or cannot finish, try the other methods. This can start a temporary browser and check the public directory. Escape cancels the whole search." :
             player.Focused ? "Choose which player opens the stream when you press Enter. Automatic prefers a supported default playlist app, then looks for VLC, Foobar2000 and FastPlay. Shift+Enter still uses the Windows default." :
-            playerPath.Focused || choosePlayer.Focused ? "For a player outside Program Files, such as a portable copy, choose its vlc.exe, foobar2000.exe or FastPlay.exe. Enter uses it when Media player is Automatic or the same player. Add to Foobar2000 uses a chosen Foobar2000. Leave blank to look in the usual places." :
+            playerPath.Focused || choosePlayer.Focused ? "For a player outside Program Files, such as a portable copy, choose its vlc.exe, foobar2000.exe or FastPlay.exe. Enter uses it when Media player is Automatic or set to that player. Add to Foobar2000 uses a chosen Foobar2000. For a PortableApps copy, choose vlc.exe inside its App folder, not the launcher. Leave blank to look in the usual places." :
             folder.Focused || browse.Focused || defaults.Focused ?
                 "Choose where Shift+Enter saves playlists. Ctrl+S starts its Save dialog in the same folder." :
             updates.Focused || tabs.SelectedIndex == 1 ?
