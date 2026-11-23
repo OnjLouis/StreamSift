@@ -112,9 +112,9 @@ internal sealed class PreferencesDialog : Form
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
         if (keyData != Keys.F1) return base.ProcessCmdKey(ref msg, keyData);
-        string text = sounds.Focused ? "Play a sound when a search starts and another when it finishes." :
+        string text = sounds.Focused ? "Play sounds when a search starts, succeeds or fails." :
             fallback.Focused ? "If the chosen method finds no playable stream or cannot finish, try the other methods. This can start a temporary browser and check the public directory. Escape cancels the whole search." :
-            player.Focused ? "Choose which player opens the stream when you press Enter. Automatic prefers a supported default playlist app, then looks for VLC, Foobar2000 and FastPlay. Shift+Enter still uses the Windows default." :
+            player.Focused ? "Choose which player opens the stream when you press Enter. Automatic uses your default playlist app when available. Shift+Enter also saves a playlist before opening it." :
             folder.Focused || browse.Focused || defaults.Focused ?
                 "Choose where Shift+Enter saves playlists. Ctrl+S starts its Save dialog in the same folder." :
             updates.Focused || tabs.SelectedIndex == 1 ?

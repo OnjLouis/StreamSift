@@ -9,7 +9,7 @@ internal sealed class MainForm : Form
     private readonly ComboBox url = new() { AccessibleName = "Website address or station name", Dock = DockStyle.Fill,
         DropDownStyle = ComboBoxStyle.DropDown, MaxLength = 4096, MaxDropDownItems = SearchHistory.Capacity };
     private readonly ShortcutButton find = new() { Text = "Find streams", ShortcutText = "Ctrl+Enter", AutoSize = true, TabIndex = 1 };
-    private readonly ShortcutButton findBrowser = new() { Text = "Find with browser", ShortcutText = "Ctrl+Shift+Enter", AutoSize = true };
+    private readonly ShortcutButton findDirectory = new() { Text = "Look up in public directory", ShortcutText = "Ctrl+Shift+D", AutoSize = true };
     private readonly ShortcutButton cancel = new() { Text = "Cancel", ShortcutText = "Esc", AutoSize = true, Enabled = false, TabIndex = 2 };
     private readonly StreamList results = new()
     {
@@ -84,7 +84,7 @@ internal sealed class MainForm : Form
         findResultCommand = MenuCommand.Create("Find in results...", () => ShowResultFind(), Keys.Control | Keys.F);
         nextResultCommand = MenuCommand.Create("Find next", () => FindResult(false), Keys.F3);
         previousResultCommand = MenuCommand.Create("Find previous", () => FindResult(true), Keys.Shift | Keys.F3);
-        actions.DropDownItems.AddRange([browserCommand, directoryCommand, refreshCommand, new ToolStripSeparator(),
+        actions.DropDownItems.AddRange([directoryCommand, browserCommand, refreshCommand, new ToolStripSeparator(),
             previewCommand, openBrowserCommand, copyCommand, foobarCommand, openPlayerCommand, new ToolStripSeparator(),
             streamsCommand, detailsCommand, statusCommand, filterCommand, findResultCommand, nextResultCommand, previousResultCommand]);
         var options = new ToolStripMenuItem("&Options");
@@ -95,9 +95,12 @@ internal sealed class MainForm : Form
         support.DropDownItems.Add(MenuCommand.Create("Open &manual", OpenManual));
         updateCommand = MenuCommand.Create("Check for updates...", () => _ = CheckForUpdatesAsync(), Keys.Shift | Keys.F1);
         support.DropDownItems.Add(updateCommand);
+        var historyCommand = new ToolStripMenuItem("&Version history...");
+        historyCommand.Click += async (_, _) => await ShowVersionHistoryAsync(historyCommand);
+        support.DropDownItems.Add(historyCommand);
         support.DropDownItems.Add(MenuCommand.Create("GitHub project", () => SafeAction(() => Open("https://github.com/OnjLouis/StreamSift")), Keys.Control | Keys.F1));
         support.DropDownItems.Add(MenuCommand.Create("&Donate", () => SafeAction(() => Open("https://onj.me/donate"))));
-        support.DropDownItems.Add(MenuCommand.Create("A&bout", () => ShowText("About StreamSift", "StreamSift " + Program.Version + "\r\nBy Andre Louis")));
+        support.DropDownItems.Add(MenuCommand.Create("&About", () => ShowText("About StreamSift", "StreamSift " + Program.Version + "\r\nBy Andre Louis")));
         menus.Items.AddRange([file, actions, options, support]);
         MainMenuStrip = menus;
 
@@ -112,10 +115,10 @@ internal sealed class MainForm : Form
         var urlLabel = new Label { Text = "&Website address or station name:", Anchor = AnchorStyles.Left, AutoSize = true, TabIndex = 0 };
         url.TabIndex = 1;
         find.TabIndex = 0;
-        findBrowser.TabIndex = 1;
+        findDirectory.TabIndex = 1;
         cancel.TabIndex = 2;
         var buttons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Margin = new(0), TabIndex = 2 };
-        buttons.Controls.AddRange([find, findBrowser, cancel]);
+        buttons.Controls.AddRange([find, findDirectory, cancel]);
         entry.Controls.Add(urlLabel, 0, 0);
         entry.Controls.Add(url, 1, 0);
         entry.Controls.Add(buttons, 0, 1);
@@ -160,14 +163,14 @@ internal sealed class MainForm : Form
         Controls.Add(menus);
 
         help[url] = "Enter a public website, stream address, station name or call sign. Alt+Down Arrow opens recent successful searches. Select an entry, then press Enter in the field to find streams.";
-        help[find] = "Scan the address for live audio, or look up a station name in public radio directories.";
-        help[findBrowser] = "Look for live audio using a temporary, muted browser. Requires Chrome or Microsoft Edge.";
+        help[find] = "Scan an address for live audio, or find a station by name using recent websites and public radio directories.";
+        help[findDirectory] = "Look up a station name, call sign or website in public radio directories and verify matching streams.";
         help[cancel] = "Stop the current search. You can also press Escape.";
         help[results] = ContextGuide.Streams(0);
         help[details] = "Select a row in Stream Details to read its available commands.";
         help[status] = "Review the last result or operation. A search with no results does not prove that the website has no live stream.";
         find.Click += async (_, _) => await FindAsync();
-        findBrowser.Click += async (_, _) => await FindAsync(SearchMethod.Browser);
+        findDirectory.Click += async (_, _) => await FindAsync(SearchMethod.Directory);
         cancel.Click += (_, _) => scan?.Cancel();
         Shown += async (_, _) =>
         {
@@ -287,18 +290,19 @@ internal sealed class MainForm : Form
         var operation = new CancellationTokenSource();
         scan = operation;
         waitForScanOnClose = fallback || mode != SearchMethod.Passive;
-        bool focusCancel = url.ContainsFocus || find.Focused || findBrowser.Focused || results.Focused || details.Focused;
+        bool focusCancel = url.ContainsFocus || find.Focused || findDirectory.Focused || results.Focused || details.Focused;
         cancel.Enabled = true;
         if (focusCancel) cancel.Focus();
         if (refreshing || newInput != null) url.Text = searchText;
         if (!refreshing) ClearResults();
         lastSearch = (searchText, requestedMethod);
         UpdateSelection();
-        SetStatus(refreshing ? "Refreshing results..." : StartingSearch(mode));
+        SetStatus(refreshing ? "Refreshing results..." : stationSearch && requestedMethod == SearchMethod.Passive
+            ? "Finding streams..." : StartingSearch(mode));
         sounds.SearchStarted();
         url.Enabled = false;
         clearHistoryCommand.Enabled = false;
-        find.Enabled = findBrowser.Enabled = false;
+        find.Enabled = findDirectory.Enabled = false;
         browserCommand.Enabled = false;
         directoryCommand.Enabled = false;
         IProgress<SearchMethod> progress = new Progress<SearchMethod>(method =>
@@ -311,13 +315,15 @@ internal sealed class MainForm : Form
         try
         {
             var sequence = new SearchSequence(client, Path.Combine(Preferences.UserDirectory, "Cache"));
-            var run = await Task.Run(() => stationSearch ? sequence.FindStationAsync(searchText, operation.Token) :
+            var recentSearches = requestedMethod == SearchMethod.Passive ? history : null;
+            var run = await Task.Run(() => stationSearch ? sequence.FindStationAsync(searchText, operation.Token, recentSearches) :
                 sequence.FindAsync(searchText, mode, fallback, operation.Token,
                 (method, number) => { if (number > 1) progress.Report(method); }));
             if (closing) return;
             operation.Token.ThrowIfCancellationRequested();
             var found = run.Result;
-            var recent = SearchHistory.Remember(history, searchText, found.Stations.Count);
+            var recent = SearchHistory.Remember(history, searchText,
+                found.EntryWasWebsite ? found.Stations.Count : found.Stations.Count(s => !s.IsVideo));
             if (!ReferenceEquals(recent, history))
             {
                 history = recent;
@@ -349,7 +355,7 @@ internal sealed class MainForm : Form
                 (refreshing && previousFormat != null && resultView.Format == null && found.Stations.Count != 0
                     ? $" {previousFormat} is no longer available. Showing all formats." : "") +
                 (historyNotSaved ? " Recent searches could not be saved." : ""));
-            sounds.SearchCompleted();
+            sounds.SearchCompleted(found.Stations.Count);
         }
         catch (OperationCanceledException) when (operation.IsCancellationRequested)
         {
@@ -358,12 +364,16 @@ internal sealed class MainForm : Form
         catch (Exception e) when (e is OperationCanceledException or HttpRequestException or IOException or InvalidOperationException or
             System.ComponentModel.Win32Exception or System.Text.Json.JsonException or UnauthorizedAccessException)
         {
-            if (!closing) SetStatus(refreshing && focusResults ? "Refresh could not finish. Previous results kept." : mode switch
+            if (!closing)
             {
-                SearchMethod.Browser => "Browser-assisted search could not finish.",
-                SearchMethod.Directory => "Public directory lookup could not finish.",
-                _ => "Search could not finish. Try the station's player page."
-            });
+                SetStatus(refreshing && focusResults ? "Refresh could not finish. Previous results kept." : mode switch
+                {
+                    SearchMethod.Browser => "Browser-assisted search could not finish.",
+                    SearchMethod.Directory => "Public directory lookup could not finish.",
+                    _ => "Search could not finish. Try the station's player page."
+                });
+                if (!operation.IsCancellationRequested) sounds.SearchCompleted(0);
+            }
         }
         finally
         {
@@ -373,10 +383,10 @@ internal sealed class MainForm : Form
             if (!closing)
             {
                 // Remember the next focus inside this window even when the app is in the background.
-                var focus = IsSearchControl(ActiveControl) || url.ContainsFocus || cancel.Focused || find.Focused || findBrowser.Focused;
+                var focus = IsSearchControl(ActiveControl) || url.ContainsFocus || cancel.Focused || find.Focused || findDirectory.Focused;
                 url.Enabled = true;
                 clearHistoryCommand.Enabled = history.Length != 0;
-                find.Enabled = findBrowser.Enabled = true;
+                find.Enabled = findDirectory.Enabled = true;
                 browserCommand.Enabled = true;
                 directoryCommand.Enabled = true;
                 UpdateSelection();
@@ -393,7 +403,7 @@ internal sealed class MainForm : Form
         }
     }
 
-    private bool IsSearchControl(Control? control) => control == url || control == cancel || control == find || control == findBrowser;
+    private bool IsSearchControl(Control? control) => control == url || control == cancel || control == find || control == findDirectory;
 
     private void RefreshHistory()
     {
@@ -417,6 +427,38 @@ internal sealed class MainForm : Form
         SetStatus("Search history cleared.");
     });
 
+    private async Task ShowVersionHistoryAsync(ToolStripMenuItem command)
+    {
+        command.Enabled = false;
+        try
+        {
+            Onj.SignedUpdater.UpdateOffer? release = null;
+            using var operation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var client = AppUpdate.Client();
+            try { release = await AppUpdate.ReadLatestReleaseAsync(client, operation.Token); }
+            catch (Exception error) when (error is OperationCanceledException or IOException or InvalidDataException or
+                HttpRequestException or System.Runtime.Serialization.SerializationException or System.Xml.XmlException) { }
+            if (closing || IsDisposed) return;
+
+            var version = release?.Version.ToString(3);
+            var notes = release == null ? "Version history could not be loaded. You can open all releases in your browser." :
+                $"Latest published release: {version}\r\n\r\n" + FormatReleaseNotes(release.Notes, "No release notes were provided.");
+            using var dialog = new TextDialog("Version history", notes,
+                () => SafeAction(() => Open(AppUpdate.ReleasesUrl)), version == null ? null : "Open &release page",
+                linkCaption: "Open &all releases");
+            if (dialog.ShowDialog(this) == DialogResult.OK && version != null)
+                SafeAction(() => Open(AppUpdate.ReleasesUrl + "/tag/v" + version));
+        }
+        finally
+        {
+            if (!closing && !IsDisposed) command.Enabled = true;
+        }
+    }
+
+    private static string FormatReleaseNotes(string? notes, string fallback) =>
+        string.IsNullOrWhiteSpace(notes) ? fallback :
+            new string(notes.Take(12000).Where(c => !char.IsControl(c) || c is '\r' or '\n' or '\t').ToArray()).ReplaceLineEndings("\r\n");
+
     private async Task CheckForUpdatesAsync()
     {
         if (updateCheck != null) return;
@@ -428,7 +470,7 @@ internal sealed class MainForm : Form
         using var operation = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         updateCheck = operation;
         updateCommand.Enabled = false;
-        find.Enabled = findBrowser.Enabled = false;
+        find.Enabled = findDirectory.Enabled = false;
         browserCommand.Enabled = false;
         directoryCommand.Enabled = false;
         bool installing = false;
@@ -445,8 +487,7 @@ internal sealed class MainForm : Form
                 return;
             }
             AppUpdate.CheckOfferAddresses(offer);
-            var notes = string.IsNullOrWhiteSpace(offer.Notes) ? "" :
-                "\r\n\r\n" + new string(offer.Notes.Take(12000).Where(c => !char.IsControl(c) || c is '\r' or '\n' or '\t').ToArray());
+            var notes = string.IsNullOrWhiteSpace(offer.Notes) ? "" : "\r\n\r\n" + FormatReleaseNotes(offer.Notes, "");
             using var dialog = new TextDialog("Update available",
                 $"StreamSift {offer.Version.ToString(3)} is available. Install to close and reopen StreamSift." + notes,
                 primaryAction: "Install &update");
@@ -469,7 +510,7 @@ internal sealed class MainForm : Form
             else
             {
                 updateCommand.Enabled = true;
-                find.Enabled = findBrowser.Enabled = true;
+                find.Enabled = findDirectory.Enabled = true;
                 browserCommand.Enabled = true;
                 directoryCommand.Enabled = true;
             }
@@ -734,22 +775,19 @@ internal sealed class MainForm : Form
             return;
         }
         if (Selected is not Station item) return;
-        var choice = preferences.MediaPlayer;
-        var player = StreamPreview.FindPlayer(choice);
+        var player = StreamPreview.FindPlayer(preferences.MediaPlayer);
         if (player == null)
         {
-            ShowText(StreamList.PlayLabel, choice == PlayerChoice.Automatic
-                ? "VLC, Foobar2000 and FastPlay were not found. Install one of these players, or press Shift+Enter to save and open a playlist in your default player."
-                : StreamPreview.DisplayName(choice) + " was not found. Choose another media player in Preferences, or press Shift+Enter to open a saved playlist in your default player.");
+            ShowText(StreamList.PlayLabel, "No playlist player was found. Choose a media player in Preferences or set a default app for .m3u8 files.");
             return;
         }
         SafeAction(() =>
         {
-            var playlist = player.Kind == PlayerChoice.FastPlay ? FoobarHandoff.Stage(FoobarHandoff.Folder, [item]) : null;
+            var playlist = player.NeedsPlaylist ? FoobarHandoff.Stage(FoobarHandoff.Folder, [item]) : null;
             try
             {
                 using var process = Process.Start(StreamPreview.Command(player, item, playlist));
-                if (process == null) throw new IOException(player.Name + " could not start.");
+                if (process == null && !player.ShellPlaylist) throw new IOException(player.Name + " could not start.");
             }
             catch
             {
@@ -874,6 +912,17 @@ internal sealed class MainForm : Form
 
     internal int CheckControls()
     {
+        var helpItems = MainMenuStrip!.Items.OfType<ToolStripMenuItem>().Single(menu => menu.Text == "&Help")
+            .DropDownItems.OfType<ToolStripMenuItem>().ToArray();
+        bool duplicateHelpMnemonic = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".Any(key =>
+            helpItems.Count(item => Control.IsMnemonic(key, item.Text ?? "")) > 1);
+        if (!helpItems.Any(item => item.Text == "&About" && item.ShortcutKeys == Keys.None) ||
+            !helpItems.Any(item => item.Text == "&Version history..." && item.ShortcutKeys == Keys.None) ||
+            duplicateHelpMnemonic)
+        {
+            Console.Error.WriteLine("Help menu must have unique mnemonics, with A for About and V for Version history.");
+            return 2;
+        }
         if (!string.Equals(results.AccessibilityObject.KeyboardShortcut, "Alt+S", StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(details.AccessibilityObject.KeyboardShortcut, "Alt+D", StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(status.AccessibilityObject.KeyboardShortcut, "Alt+U", StringComparison.OrdinalIgnoreCase))
@@ -884,16 +933,16 @@ internal sealed class MainForm : Form
         var page = url.Parent!;
         var panel = page.Parent!;
         var buttons = find.Parent!;
-        bool ok = buttons.Parent == page && findBrowser.Parent == buttons && cancel.Parent == buttons &&
+        bool ok = buttons.Parent == page && findDirectory.Parent == buttons && cancel.Parent == buttons &&
             page.Controls.GetChildIndex(url) < page.Controls.GetChildIndex(buttons) &&
-            url.TabIndex < buttons.TabIndex && find.TabIndex < findBrowser.TabIndex && findBrowser.TabIndex < cancel.TabIndex &&
+            url.TabIndex < buttons.TabIndex && find.TabIndex < findDirectory.TabIndex && findDirectory.TabIndex < cancel.TabIndex &&
             page.TabIndex < results.TabIndex && results.TabIndex < details.TabIndex && details.TabIndex < status.TabIndex &&
             results.Parent == panel && details.Parent == panel && !details.MultiSelect && status.ReadOnly &&
             results.AccessibilityObject.Name == "Streams" && url.AccessibilityObject.Name == "Website address or station name" &&
             url.DropDownStyle == ComboBoxStyle.DropDown && url.MaxDropDownItems == SearchHistory.Capacity &&
             !clearHistoryCommand.Enabled && url.Items.Count == 0 &&
             find.AccessibilityObject.KeyboardShortcut == "Ctrl+Enter" && cancel.AccessibilityObject.KeyboardShortcut == "Esc" &&
-            findBrowser.AccessibilityObject.Name == "Find with browser" && findBrowser.AccessibilityObject.KeyboardShortcut == "Ctrl+Shift+Enter" &&
+            findDirectory.AccessibilityObject.Name == "Look up in public directory" && findDirectory.AccessibilityObject.KeyboardShortcut == "Ctrl+Shift+D" &&
             IsSearchKey(Keys.Enter, true) && !IsSearchKey(Keys.Enter, false) &&
             IsSearchKey(Keys.Control | Keys.Enter, false) && StreamList.PreviewsStream(Keys.Enter) && !StreamList.OpensMenu(Keys.Enter) &&
             StreamList.OpensMenu(Keys.Apps) && StreamList.OpensMenu(Keys.Shift | Keys.F10) &&

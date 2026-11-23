@@ -4,9 +4,10 @@ StreamSift finds public live audio streams behind radio websites. It has
 native Windows and Mac apps with keyboard-operated results, address copying,
 M3U8 export and opening in the system's default playlist player. The Windows
 app can also send streams to an installed copy of foobar2000.
-Enter or Return plays a selected result in VLC or FastPlay on both platforms,
-or foobar2000 on Windows. This does not add a saved playlist. Saving and
-opening a playlist still uses the system default.
+Enter or Return sends the selected result to the chosen media player.
+Automatic uses the system default playlist app when available; neither
+choice adds a saved playlist. Saving and opening a playlist still uses
+the system default.
 The editable address field remembers the last ten successful searches.
 Select multiple results to save them as one playlist.
 Results can be filtered by format, sorted by name, bitrate or reported
@@ -22,14 +23,22 @@ Icecast, SHOUTcast, Global and the Locus Sonus soundmap. The
 public-directory command matches websites against Radio Browser; station
 names and call signs are matched against Radio Browser and the
 [International Public Radio Directory](https://iprd-org.github.io/iprd/).
-StreamSift matches the downloaded catalogue data locally before verifying
-stream addresses; it does not send your search text to the directories.
+StreamSift matches catalogue data locally and can reuse a matching recent
+station website on a name search. It verifies the streams again and can
+prefer an equivalent media-player address when a streaming panel offers one.
+It does not send your search text to the directories.
 When the Radio Browser cache needs refreshing, StreamSift can try another
 public mirror if one is unavailable.
 
 Optional automatic fallback runs the selected method first. When no live
-stream is verified, it tries the remaining methods in website, browser, then
-directory order. This is off by default on both platforms.
+stream is verified, it tries the remaining methods in website, directory, then
+browser order. This is off by default on both platforms.
+
+Website and browser searches also recognise public MP4 and WebM video and
+unencrypted live HLS video with no separate audio playlist. The configured
+player can open video or just its audio, depending on the player. Automatic
+uses the default playlist app when available, with a temporary file when
+needed. Thanks to Cory for the video discovery contribution.
 
 ## Build and test
 

@@ -34,7 +34,7 @@ public sealed class BrowserDiscovery(HttpClient client)
         var executable = BrowserPath() ?? throw new InvalidOperationException("Chrome or Edge is not installed.");
         var profile = Directory.CreateTempSubdirectory("streamsift-browser-");
         var observed = new Dictionary<string, Uri>(StringComparer.Ordinal);
-        int requests = 0, received = 0, events = 0;
+        int requests = 0, received = 0, events = 0, entryWasWebsite = 0;
         bool timedOut = false;
         try
         {
@@ -170,8 +170,11 @@ public sealed class BrowserDiscovery(HttpClient client)
                         }
                         using var response = await client.SendAsync(outgoing, HttpCompletionOption.ResponseHeadersRead, requestTime.Token);
                         var type = response.Content.Headers.ContentType?.MediaType;
+                        if (response.IsSuccessStatusCode && address == start && kind == "Document" &&
+                            type is "text/html" or "application/xhtml+xml")
+                            Interlocked.Exchange(ref entryWasWebsite, 1);
                         if (response.IsSuccessStatusCode && type != null &&
-                            (type.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) ||
+                            (type.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) || type is "video/mp4" or "video/webm" ||
                              type.Contains("mpegurl", StringComparison.OrdinalIgnoreCase) || type == "application/ogg"))
                         {
                             Remember(address);
@@ -260,7 +263,7 @@ public sealed class BrowserDiscovery(HttpClient client)
         }
 
         var verified = await new Discovery(client).VerifyObservedAsync(start, observed.Values, cancel, progress);
-        return verified with { LimitReached = verified.LimitReached || timedOut ||
+        return verified with { EntryWasWebsite = entryWasWebsite != 0, LimitReached = verified.LimitReached || timedOut ||
             requests > MaxBrowserRequests || received > MaxReceived || events > MaxBrowserEvents };
 
         void Remember(Uri address)
@@ -271,7 +274,7 @@ public sealed class BrowserDiscovery(HttpClient client)
     }
 
     private static bool MediaAddress(Uri uri) => Path.GetExtension(uri.AbsolutePath).ToLowerInvariant() is
-        ".m3u8" or ".m3u" or ".pls" or ".xspf" or ".asx" or ".mp3" or ".mp2" or ".aac" or ".aacp" or ".flac" or ".ogg" or ".opus";
+        ".m3u8" or ".m3u" or ".pls" or ".xspf" or ".asx" or ".mp3" or ".mp2" or ".aac" or ".aacp" or ".flac" or ".ogg" or ".opus" or ".mp4" or ".webm";
 
     private static string? BrowserPath()
     {
@@ -336,14 +339,14 @@ public sealed class BrowserDiscovery(HttpClient client)
 
     private const string PlayOnce = """
         (() => {
-          const patterns = /^(play(?: live| radio| live radio| now)?|listen(?: live| now)?|lyssna|en vivo|ao vivo|ouvir ao vivo|escuchar en vivo|ecouter en direct)$/i;
+          const patterns = /^(play(?: live| radio| live radio| now)?|watch live|listen(?: live| now)?|lyssna|en vivo|ao vivo|ouvir ao vivo|escuchar en vivo|ecouter en direct)$/i;
           const control = [...document.querySelectorAll('button,[role="button"]')].find(el =>
             el.getClientRects().length && !el.matches(':disabled,[aria-disabled="true"]') &&
             [el.getAttribute('aria-label'),el.title,el.textContent].some(text => patterns.test((text || '').trim())));
           if (control) control.click();
           else {
-            const audio = document.querySelector('audio');
-            if (audio) { audio.muted = true; audio.play().catch(() => {}); }
+            const media = document.querySelector('audio, video');
+            if (media) { media.muted = true; media.play().catch(() => {}); }
           }
         })()
         """;

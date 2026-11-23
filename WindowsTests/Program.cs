@@ -26,14 +26,20 @@ void Reject(Action test, string label)
     throw new InvalidOperationException(label);
 }
 
-foreach (var resource in new[] { SearchSounds.SearchResource, SearchSounds.DoneResource })
+foreach (var resource in new[] { SearchSounds.SearchResource, SearchSounds.DoneResource, SearchSounds.FailureResource })
 {
     using var sound = typeof(SearchSounds).Assembly.GetManifestResourceStream(resource);
-    Check(sound != null && sound.Length is > 16000 and < 28000, "Search cue embedded.");
+    Check(sound != null && sound.Length is > 16000 and < 28000, $"Search cue embedded: {resource}");
     var header = new byte[12];
     sound!.ReadExactly(header);
     Check(header.AsSpan(0, 4).SequenceEqual("RIFF"u8) && header.AsSpan(8, 4).SequenceEqual("WAVE"u8), "WAV format.");
 }
+Check(SearchSounds.CompletionResource(0) == SearchSounds.FailureResource &&
+      SearchSounds.CompletionResource(1) == SearchSounds.DoneResource,
+    "Empty and failed searches use a different sound from successful searches.");
+using (var failureCue = typeof(SearchSounds).Assembly.GetManifestResourceStream(SearchSounds.FailureResource)!)
+    Check(Convert.ToHexString(SHA256.HashData(failureCue)) ==
+        "50CC0C1F6E69064155691E6F58E2B2131568389BCB2C3BFC2FA57D71A14A9F83", "Original failure WAV is unmodified.");
 
 var prefsFolder = Path.Combine(directory, "prefs");
 Directory.CreateDirectory(prefsFolder);
@@ -131,10 +137,11 @@ var sessionFolder = Path.Combine(directory, "last-results");
 Check(LastResults.Load(sessionFolder) == null && !Directory.Exists(sessionFolder), "First launch does not create a results snapshot.");
 var signedStream = station with { Url = new Uri("https://radio.example/live?token=fixture") };
 var hlsStream = station with { Url = new Uri("https://radio.example/opaque-session/playlist.m3u8"), Format = "HLS", IsHls = true };
+var videoStream = station with { Url = new Uri("https://radio.example/opaque-session/video.mp4"), Format = "MP4 video", IsVideo = true };
 var unsafeSource = station with { FoundOn = new Uri("https://radio.example/list?token=fixture") };
 var unsafeAddress = station with { Url = new Uri("http://127.0.0.1/stream") };
 var snapshot = LastResults.Capture("radio.example:8000", SearchMethod.Passive,
-    [signedStream, hlsStream, unsafeSource, unsafeAddress, station, quiet, quiet], refreshView, quiet.Url)!;
+    [signedStream, hlsStream, videoStream, unsafeSource, unsafeAddress, station, quiet, quiet], refreshView, quiet.Url)!;
 Check(snapshot is not null && snapshot.Stations.SequenceEqual([station, quiet]), "Keep reusable streams only; filter temporary and local URLs.");
 snapshot!.Save(sessionFolder);
 Check(LastResults.Load(sessionFolder) is { } restored && restored.Input == "radio.example:8000" &&
@@ -193,8 +200,8 @@ foreach (var exe in new[] { vlcPath, foobarPath, fastPlayPath, portableFoobar, o
 }
 Check(StreamPreview.ResolvePlayer(PlayerChoice.Automatic, portableFoobar, [playerRoot]) is { Executable: var preferred } &&
     preferred == portableFoobar, "Automatic prefers a supported default, including portable players.");
-Check(StreamPreview.ResolvePlayer(PlayerChoice.Automatic, otherPlayer, [playerRoot]) is { Kind: PlayerChoice.Vlc },
-    "Automatic ignores unsupported defaults and prefers installed VLC.");
+Check(StreamPreview.ResolvePlayer(PlayerChoice.Automatic, otherPlayer, [playerRoot]) is { ShellPlaylist: true, NeedsPlaylist: true },
+    "Automatic uses the registered default playlist app even if it does not accept direct URL arguments.");
 Check(StreamPreview.ResolvePlayer(PlayerChoice.Vlc, portableFoobar, [playerRoot]) is { Executable: var chosenVlc } && chosenVlc == vlcPath,
     "Explicit VLC ignores the Foobar2000 association.");
 Check(StreamPreview.ResolvePlayer(PlayerChoice.Foobar2000, vlcPath, [playerRoot]) is { Executable: var chosenFoobar } &&
@@ -209,15 +216,22 @@ Reject(() => StreamPreview.Command(fastPlay, station), "FastPlay was given a raw
 Check(StreamPreview.Command(fastPlay, station, handoff).ArgumentList.SequenceEqual([handoff]),
     "FastPlay opens only the one-stream temporary playlist.");
 File.Delete(vlcPath);
-Check(StreamPreview.ResolvePlayer(PlayerChoice.Vlc, portableFoobar, [playerRoot]) == null &&
+Check(StreamPreview.ResolvePlayer(PlayerChoice.Vlc, portableFoobar, [playerRoot])?.Executable == portableFoobar &&
     StreamPreview.ResolvePlayer(PlayerChoice.Automatic, vlcPath, [playerRoot])?.Executable == foobarPath,
-    "A missing explicit player does not fall back, but Automatic does.");
+    "A missing explicit player can use the registered default.");
+var shellPlayer = StreamPreview.ResolvePlayer(PlayerChoice.Automatic, otherPlayer, [])!;
+Reject(() => StreamPreview.Command(shellPlayer, videoStream), "The system default was given a raw URL.");
+var shellCommand = StreamPreview.Command(shellPlayer, videoStream, handoff);
+Check(shellCommand.UseShellExecute && shellCommand.FileName == handoff && shellCommand.ArgumentList.Count == 0,
+    "The default player receives only a temporary playlist, not an exported file or a browser URL.");
 var preview = StreamPreview.Command(new StreamPreview.Player(vlcPath, PlayerChoice.Vlc), station);
 Check(!preview.UseShellExecute && preview.ArgumentList.SequenceEqual([station.Url.AbsoluteUri]),
     "Preview sends exactly the raw stream argument to the player without creating a playlist.");
 var directFoobar = StreamPreview.Command(new StreamPreview.Player(foobarPath, PlayerChoice.Foobar2000), station);
 Check(directFoobar.ArgumentList.SequenceEqual(["/immediate", station.Url.AbsoluteUri]),
     "Foobar preview uses regular open, without an add or play-existing command.");
+Check(StreamPreview.Command(new StreamPreview.Player(foobarPath, PlayerChoice.Foobar2000), videoStream)
+    .ArgumentList.SequenceEqual(["/immediate", videoStream.Url.AbsoluteUri]), "Video can also go directly to Foobar2000.");
 Check(command.ArgumentList.SequenceEqual(new[] { "/add", handoff }) && !command.UseShellExecute &&
     File.ReadAllText(handoff) == expectedPlaylist, "Foobar2000 receives a local one-stream playlist without playback or playlist selection switches.");
 var unrelatedPlaylist = Path.Combine(incoming, "handoff-important.m3u8");

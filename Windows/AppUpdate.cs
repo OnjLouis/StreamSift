@@ -12,6 +12,7 @@ internal static class AppUpdate
     internal const string Product = "StreamSift", Platform = "windows-x64";
     internal const string AssetTemplate = "StreamSift-Windows-x64-{version}.zip";
     private const string Repository = "/OnjLouis/StreamSift";
+    internal const string ReleasesUrl = "https://github.com" + Repository + "/releases";
     private const string AppFile = "StreamSift.exe", ManifestFile = "manifest.json", SignatureFile = "manifest.sig";
     private const int MaxManifest = 1024 * 1024, MaxSignature = 8192;
     internal static readonly string[] ManagedFiles = [AppFile, "StreamSift.dll", "StreamSift.deps.json",
@@ -49,6 +50,9 @@ internal static class AppUpdate
     internal static GitHubUpdates Client() => new(new UpdateTransport(), TimeSpan.FromSeconds(25));
     internal static Task<UpdateOffer> CheckAsync(GitHubUpdates client, CancellationToken token) =>
         client.CheckAsync("OnjLouis", Product, "v", AssetTemplate, Current, token);
+
+    internal static Task<UpdateOffer> ReadLatestReleaseAsync(GitHubUpdates client, CancellationToken token) =>
+        client.CheckAsync("OnjLouis", Product, "v", AssetTemplate, new Version(0, 0, 0), token);
 
     internal static async Task StageAndStartAsync(GitHubUpdates client, UpdateOffer offer, UpdatePolicy policy, CancellationToken token)
     {

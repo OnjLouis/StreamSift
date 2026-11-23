@@ -7,12 +7,15 @@ internal sealed class SearchSounds : IDisposable
 {
     internal const string SearchResource = "StreamSift.Sounds.search.wav";
     internal const string DoneResource = "StreamSift.Sounds.done.wav";
+    internal const string FailureResource = "StreamSift.Sounds.error.wav";
     private readonly SoundPlayer? start = Load(SearchResource);
     private readonly SoundPlayer? done = Load(DoneResource);
+    private readonly SoundPlayer? failure = Load(FailureResource);
     internal bool Enabled { get; set; } = true;
 
     internal void SearchStarted() => Play(start);
-    internal void SearchCompleted() => Play(done);
+    internal static string CompletionResource(int verifiedStreams) => verifiedStreams > 0 ? DoneResource : FailureResource;
+    internal void SearchCompleted(int verifiedStreams) => Play(CompletionResource(verifiedStreams) == DoneResource ? done : failure);
 
     private void Play(SoundPlayer? player)
     {
@@ -39,7 +42,7 @@ internal sealed class SearchSounds : IDisposable
 
     public void Dispose()
     {
-        foreach (var player in new[] { start, done })
+        foreach (var player in new[] { start, done, failure })
         {
             if (player == null) continue;
             player.Stream?.Dispose();

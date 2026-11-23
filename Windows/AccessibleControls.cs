@@ -37,8 +37,8 @@ internal sealed class TextDialog : Form
     private readonly Button close;
     private readonly Action? reviewHelpManual;
 
-    internal TextDialog(string title, string message, Action? openManual = null, string? primaryAction = null,
-        bool wordWrap = true, Action? reviewHelpManual = null)
+    internal TextDialog(string title, string message, Action? openLink = null, string? primaryAction = null,
+        bool wordWrap = true, Action? reviewHelpManual = null, string linkCaption = "Open &Manual")
     {
         this.reviewHelpManual = reviewHelpManual;
         Text = title;
@@ -58,11 +58,11 @@ internal sealed class TextDialog : Form
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, TabIndex = 1 };
         if (primaryAction != null)
             buttons.Controls.Add(new Button { Text = primaryAction, AutoSize = true, DialogResult = DialogResult.OK, TabIndex = 0 });
-        if (openManual != null)
+        if (openLink != null)
         {
-            var manual = new Button { Text = "Open &Manual", AutoSize = true, TabIndex = buttons.Controls.Count };
-            manual.Click += (_, _) => openManual();
-            buttons.Controls.Add(manual);
+            var link = new Button { Text = linkCaption, AutoSize = true, TabIndex = buttons.Controls.Count };
+            link.Click += (_, _) => openLink();
+            buttons.Controls.Add(link);
         }
         close.TabIndex = buttons.Controls.Count;
         buttons.Controls.Add(close);

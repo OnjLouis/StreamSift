@@ -209,10 +209,10 @@ final class StreamTable: NSTableView {
     private let folder = NSTextField()
     private let apply: (Preferences) -> Void
     private let manual: () -> Void
-    private let soundsHint = "Play a sound when a search starts and another when it finishes."
+    private let soundsHint = "Play sounds when a search starts, succeeds or fails."
     private let fallbackHint = "If the chosen method finds no playable stream or cannot finish, try the other methods. This can start a temporary browser and check the public directory. Escape cancels the whole search."
     private let folderHint = "Choose where Shift+Return saves playlists. Command+S starts its Save dialog in the same folder."
-    private let playerHint = "Choose what plays a stream when you press Return. Automatic prefers a supported default playlist app, then VLC or FastPlay. Shift+Return still uses the system default playlist player."
+    private let playerHint = "Choose what plays a stream when you press Return. Automatic uses your default playlist app when available. Shift+Return also saves a playlist before opening it."
     private let updateHint = "Check for a newer signed release when StreamSift opens. Updates are installed only after you choose Install Update."
 
     init(current: Preferences, manual: @escaping () -> Void, apply: @escaping (Preferences) -> Void) {

@@ -28,6 +28,7 @@ if (args is ["--browser-self-test"])
     const string mount = "https://audio-fixture.example/ephemeral";
     const string redirect = "https://audio-fixture.example/live";
     const string htmlOnly = "https://audio-fixture.example/not-a-stream";
+    const string clip = "https://video-fixture.example/example.webm";
     var browserFixture = new Fixture();
     browserFixture.Text(page, """
         <title>Browser fixture</title>
@@ -40,6 +41,11 @@ if (args is ["--browser-self-test"])
             media.play().catch(() => {});
             const htmlOnly = new Audio('https://audio-fixture.example/not-a-stream');
             htmlOnly.play().catch(() => {});
+            const video = document.createElement('video');
+            video.muted = true;
+            video.src = 'https://video-fixture.example/example.webm';
+            document.body.append(video);
+            video.play().catch(() => {});
         }
         </script>
         """);
@@ -49,11 +55,14 @@ if (args is ["--browser-self-test"])
     browserFixture.Audio(redirect, frame, "Browser fixture");
     browserFixture.Text(htmlOnly, """<audio src="https://audio-fixture.example/decoy.mp3"></audio>""");
     browserFixture.Audio("https://audio-fixture.example/decoy.mp3", frame);
+    browserFixture.Audio(clip, [0x1a, 0x45, 0xdf, 0xa3, 0x80, 0x42, 0x86, 0x81, 1, 0, 0, 0],
+        finite: true, type: "video/webm");
     using var browserClient = new HttpClient(browserFixture);
     var browserMode = new BrowserDiscovery(browserClient);
     var found = await browserMode.FindAsync(new Uri(page), CancellationToken.None);
-    if (found.Stations is not [{ Name: "Browser fixture", Format: "MP3" }] ||
+    if (!found.EntryWasWebsite || found.Stations is not [{ Name: "Browser fixture", Format: "MP3" }, { Format: "WebM video", IsVideo: true }] ||
         found.Stations[0].Url.AbsoluteUri != mount ||
+        found.Stations[1].Url.AbsoluteUri != clip ||
         browserFixture.Seen.Any(url => url.Contains("127.0.0.1") || url.Contains("/change") || url.Contains("/decoy.mp3")))
         throw new InvalidOperationException("Browser guard, standalone verification or redirect preservation failed.");
     using var cancelBrowser = new CancellationTokenSource(TimeSpan.FromSeconds(1));
@@ -63,7 +72,7 @@ if (args is ["--browser-self-test"])
         throw new InvalidOperationException("Browser cancellation was ignored.");
     }
     catch (OperationCanceledException) when (cancelBrowser.IsCancellationRequested) { }
-    Console.WriteLine("Browser discovery, private requests, write blocking, redirects and cancellation passed.");
+    Console.WriteLine("Browser audio and video discovery, private requests, write blocking, redirects and cancellation passed.");
     return;
 }
 
@@ -96,7 +105,13 @@ foreach (var first in Enum.GetValues<SearchMethod>())
     var order = new List<SearchMethod>();
     var result = await SearchSequence.RunAsync(first, true, (_, _) => Task.FromResult(order.Count == 3 ? fallbackHit : fallbackMiss),
         CancellationToken.None, (method, number) => { order.Add(method); Require(number == order.Count, "Attempt numbering."); });
-    Require(order.SequenceEqual(new[] { first }.Concat(Enum.GetValues<SearchMethod>().Where(method => method != first))) &&
+    SearchMethod[] expected = first switch
+    {
+        SearchMethod.Passive => [SearchMethod.Passive, SearchMethod.Directory, SearchMethod.Browser],
+        SearchMethod.Directory => [SearchMethod.Directory, SearchMethod.Passive, SearchMethod.Browser],
+        _ => [SearchMethod.Browser, SearchMethod.Passive, SearchMethod.Directory]
+    };
+    Require(order.SequenceEqual(expected) &&
         result.Method == order[2] && result.Attempts == 3 && result.FailedMethods == 0 &&
         result.Result.Stations.Count == 1 && result.Result.Requests == 8 && result.Result.Unreachable == 2 && result.Result.LimitReached,
         "Opt-in fallback tries both other methods in order and preserves the verified source and counts.");
@@ -109,6 +124,14 @@ Require(manual.Attempts == 1 && fallbackCalls == 1 && manual.Result.Stations.Cou
 var early = await SearchSequence.RunAsync(SearchMethod.Passive, true, (_, _) =>
     { fallbackCalls++; return Task.FromResult(fallbackHit); }, CancellationToken.None);
 Require(early.Attempts == 1 && fallbackCalls == 2, "A first-method hit stops fallback.");
+var directoryHit = await SearchSequence.RunAsync(SearchMethod.Passive, true, (mode, _) => mode switch
+{
+    SearchMethod.Passive => Task.FromResult(fallbackMiss),
+    SearchMethod.Directory => Task.FromResult(fallbackHit),
+    _ => throw new Exception("Browser must not start when the directory finds a stream.")
+}, CancellationToken.None);
+Require(directoryHit.Method == SearchMethod.Directory && directoryHit.Attempts == 2,
+    "A directory hit after website search avoids starting a browser.");
 var recovered = await SearchSequence.RunAsync(SearchMethod.Browser, true, (mode, _) => mode switch
 {
     SearchMethod.Browser => throw new InvalidOperationException("Browser not installed."),
@@ -147,6 +170,56 @@ foreach (var i in new[] { 0, 417 }) new byte[] { 0xff, 0xfb, 0x90, 0x64 }.CopyTo
 var handler = new Fixture();
 using var fixtureClient = new HttpClient(handler);
 var engine = new Discovery(fixtureClient);
+
+const string compatibilityPage = "https://harbourwaves.example/";
+const string browserMount = "https://panel.example:2000/stream/harbourwaves";
+const string playerMount = browserMount + "/stream.mp3";
+const string publicPlayer = "https://panel.example:2000/public/harbourwaves";
+handler.Text(compatibilityPage, $"<audio src='{browserMount}'></audio>");
+handler.Audio(browserMount, mp3, "Harbour Waves", "320", publicPage: publicPlayer);
+handler.Audio(playerMount, mp3, "Harbour Waves", "320", publicPage: publicPlayer);
+int beforeCompatibility = handler.Seen.Count;
+var compatible = await engine.FindAsync(new Uri(compatibilityPage), CancellationToken.None);
+Require(compatible.Stations is [{ Name: "Harbour Waves", Format: "MP3", Bitrate: 320 }] &&
+    compatible.Stations[0].Url.AbsoluteUri == playerMount && compatible.Stations[0].FoundOn.AbsoluteUri == compatibilityPage &&
+    handler.Seen.Skip(beforeCompatibility).SequenceEqual([compatibilityPage, browserMount, playerMount]),
+    "Verify and prefer the panel's equivalent media-player URL without a duplicate row.");
+
+foreach (var alternate in new[] { "different station", "finite file", "redirect", "unavailable" })
+{
+    switch (alternate)
+    {
+        case "different station": handler.Audio(playerMount, mp3, "Not Harbour Waves", "320", publicPage: publicPlayer); break;
+        case "finite file": handler.Audio(playerMount, mp3, "Harbour Waves", "320", finite: true, publicPage: publicPlayer); break;
+        case "redirect": handler.Redirect(playerMount, "https://elsewhere.example/untrusted.mp3"); break;
+        default: handler.Fail(playerMount, HttpStatusCode.NotFound); break;
+    }
+    int before = handler.Seen.Count;
+    var original = await engine.FindAsync(new Uri(compatibilityPage), CancellationToken.None);
+    Require(original.Stations.Count == 1 && original.Stations[0].Url.AbsoluteUri == browserMount && original.Unreachable == 0 &&
+        handler.Seen.Skip(before).SequenceEqual([compatibilityPage, browserMount, playerMount]),
+        $"Retain the verified original on an optional {alternate} response without following alternate redirects.");
+}
+handler.Audio(browserMount, mp3, "Harbour Waves", "320", publicPage: "https://other.example/public/harbourwaves");
+int beforeUnrelatedPanel = handler.Seen.Count;
+var unrelatedPanel = await engine.FindAsync(new Uri(compatibilityPage), CancellationToken.None);
+Require(unrelatedPanel.Stations is [{ Format: "MP3" }] && unrelatedPanel.Stations[0].Url.AbsoluteUri == browserMount &&
+    handler.Seen.Skip(beforeUnrelatedPanel).SequenceEqual([compatibilityPage, browserMount]),
+    "Do not guess suffixes for a stream without matching same-origin public player metadata.");
+Require(SearchSequence.CanSearchStation("HarbourWaves.mp3") && !SearchSequence.CanSearchStation("https://radio.example/a.mp3"),
+    "Treat a bare audio filename as a station-name search, not a hostname or a full URL.");
+handler.Audio(browserMount, mp3, "Harbour Waves", "320", publicPage: publicPlayer);
+handler.Audio(playerMount, mp3, "Harbour Waves", "320", publicPage: publicPlayer);
+foreach (var name in new[] { "harbourwaves", "Harbour Waves", "harbourwaves.mp3" })
+{
+    int before = handler.Seen.Count;
+    var recentMatch = await new SearchSequence(fixtureClient).FindStationAsync(name, CancellationToken.None,
+        ["https://harbourwaves.test/channel", "https://harbourwaves.test/?private-selector=1", compatibilityPage]);
+    Require(recentMatch.Method == SearchMethod.Passive && recentMatch.Result.Stations.Single().Url.AbsoluteUri == playerMount &&
+        handler.Seen.Skip(before).SequenceEqual([compatibilityPage, browserMount, playerMount]),
+        "Reuse only an exact recent website match, and verify the stream again without a directory or guessed domain.");
+}
+handler.Seen.Clear();
 handler.Text("https://radio.example/", """
     <title>Example FM</title><link rel="stylesheet" href="/style.css">
     <a href="/how-to-listen">Ways to listen</a>
@@ -198,6 +271,36 @@ Require(!handler.Seen.Any(x => x.Contains("seg.") || x.Contains("video.m3u8") ||
 Require(results.Requests == handler.Seen.Count && !results.LimitReached, "Requests were not tracked correctly.");
 Require(results.Stations.All(x => !x.Url.AbsoluteUri.Contains("oldshow") && !x.Url.AbsoluteUri.Contains("vod")), "Recording returned as live.");
 Require(results.Unreachable == 1, "Blocked redirect not counted.");
+
+handler.Text("https://tv.example/", """<title>Public TV</title><a href="/watch/">Watch live</a>""");
+handler.Text("https://tv.example/watch/", """
+    <title>Public TV</title>
+    <div data-videos='[{"video":{"meta":{"mpx_is_livestream":"1","m3u8_url":"/master.m3u8"}}},
+                       {"video":{"meta":{"mpx_is_livestream":"0","m3u8_url":"/replay.m3u8"}}}]'></div>
+    <video src="/private.m3u8"></video>
+    <video src="/encrypted.m3u8"></video><video src="/clip.mp4"></video>
+    """);
+handler.Text("https://tv.example/master.m3u8",
+    "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,CODECS=\"avc1.64001f,mp4a.40.2\"\n/channel.m3u8", "application/vnd.apple.mpegurl");
+handler.Text("https://tv.example/channel.m3u8", "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nnever-fetch.ts", "application/vnd.apple.mpegurl");
+handler.Text("https://tv.example/private.m3u8", "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nhttp://127.0.0.1/private.ts", "application/vnd.apple.mpegurl");
+handler.Text("https://tv.example/encrypted.m3u8",
+    "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-KEY:METHOD=AES-128,URI=\"never-fetch.key\"\n#EXTINF:6,\nnever-fetch.ts", "application/vnd.apple.mpegurl");
+handler.Audio("https://tv.example/clip.mp4", [0, 0, 0, 20, 102, 116, 121, 112, 105, 115, 111, 109],
+    finite: true, type: "video/mp4");
+var publicTv = await engine.FindAsync(new Uri("https://tv.example/"), CancellationToken.None);
+Require(publicTv.Stations.Count == 2 &&
+    publicTv.Stations.Any(s => s.IsVideo && s.Format == "HLS video" && s.Url.AbsolutePath == "/channel.m3u8" &&
+        s.FoundOn.AbsoluteUri == "https://tv.example/watch/") &&
+    publicTv.Stations.Any(s => s.Format == "MP4 video" && s.Url.AbsolutePath == "/clip.mp4"),
+    "Find public video and return the checked rendition, not an unchecked master.");
+var directVideo = await engine.FindAsync(new Uri("https://tv.example/clip.mp4"), CancellationToken.None);
+var directPlaylist = await engine.FindAsync(new Uri("https://tv.example/master.m3u8"), CancellationToken.None);
+Require(publicTv.EntryWasWebsite && !directVideo.EntryWasWebsite && !directPlaylist.EntryWasWebsite &&
+    directVideo.Stations is [{ IsVideo: true }] && directPlaylist.Stations is [{ IsVideo: true }],
+    "Remember the website that provided video, not a direct video URL or its master playlist.");
+Require(handler.Seen.All(url => !url.Contains("never-fetch") && !url.Contains("private.ts") && !url.Contains("/replay.m3u8")),
+    "Video search never fetches segment, key, private address or unrelated recorded video metadata.");
 
 handler.Text("https://radio.example/m3u", "#EXTM3U\n#EXTINF:-1,Relative station\n/ownstream\n", "audio/x-mpegurl");
 handler.Audio("https://radio.example/ownstream", mp3);
@@ -470,7 +573,8 @@ handler.Text(directoryApi, """
       {"homepage":"https://www.di.fm/trance","name":"Premium","url":"https://listen.di.fm/premium_high/trance.pls?listen_key=fixture"},
       {"homepage":"https://www.di.fm/trance","name":"Other broadcaster","url":"https://somewhere.example/trance"},
       {"homepage":"https://www.di.fm/trance","name":"Public candidate","url":"https://listen.di.fm/public3/trance.pls","url_resolved":"https://prem1.di.fm/trance?fixture"},
-      {"homepage":"https://directory-fixture.example/wtest","name":"WTEST-FM Harbour","url":"https://radio.example/wtest-live"}
+      {"homepage":"https://directory-fixture.example/wtest","name":"WTEST-FM Harbour","url":"https://radio.example/wtest-live"},
+      {"homepage":"https://shared-radio.example:8124/stream","name":"Other tenant","url":"https://shared-radio.example:8124/stream"}
     ]
     """, "application/json");
 handler.Redirect("https://radio.example/main-mount", "https://radio.example/current-edge");
@@ -478,6 +582,7 @@ handler.Audio("https://radio.example/current-edge", mp3);
 handler.Audio("https://radio.example/other-live", mp3);
 handler.Audio("https://radio.example/wtest-live", mp3);
 handler.Audio("https://radio.example/wtest-extra", mp3);
+handler.Audio("https://shared-radio.example:8124/stream", mp3);
 handler.Text(iprdApi, """
     {"stations":[
       {"name":"WTEST","website":"https://harbour-fixture.example/","streams":[{"url":"https://radio.example/wtest-extra"}]},
@@ -516,6 +621,18 @@ try
     var network = await lookup.FindAsync(new Uri("https://directory-fixture.example/"), CancellationToken.None);
     Require(network.Stations.Select(station => station.Name).ToHashSet().SetEquals(["Other outlet on same site", "Named local news", "WTEST-FM Harbour"]),
         "A network homepage can offer multiple named outlets.");
+    int beforeSharedHost = handler.Seen.Count;
+    foreach (var address in new[] { "https://shared-radio.example:2000/", "https://shared-radio.example/",
+        "http://shared-radio.example:8124/" })
+    {
+        var unrelated = await lookup.FindAsync(new Uri(address), CancellationToken.None);
+        Require(unrelated.Stations.Count == 0 && handler.Seen.Count == beforeSharedHost,
+            "Directory fallback must not probe stations on another service at the same hostname.");
+    }
+    var samePort = await lookup.FindAsync(new Uri("https://shared-radio.example:8124/"), CancellationToken.None);
+    Require(samePort.Stations is [{ Name: "Other tenant" }] &&
+        handler.Seen.Skip(beforeSharedHost).SequenceEqual(["https://shared-radio.example:8124/stream"]),
+        "A directory entry on the exact streaming server must still be verified normally.");
     handler.Fail("https://listen.di.fm/public3/trance.pls", HttpStatusCode.NotFound);
     int beforeDi = handler.Seen.Count;
     var di = await lookup.FindAsync(new Uri("https://www.di.fm/trance"), CancellationToken.None);
@@ -537,6 +654,8 @@ try
         SearchSequence.CanSearchStation("104.3") && SearchSequence.CanSearchStation("BBC Radio 4") &&
         !SearchSequence.CanSearchStation("https://127.0.0.1/path") && !SearchSequence.CanSearchStation("prem1.di.fm"),
         "Reuse the secondary catalogue and distinguish station names from addresses.");
+    var byFilename = await lookup.FindByNameAsync("W TEST.mp3", CancellationToken.None);
+    Require(byFilename.Stations is [{ Name: "WTEST" }], "Match compact names with an optional audio filename suffix.");
 
     // Files from the released version may predate the new writer-side validation.
     var oldCachePath = Path.Combine(directoryCache.FullName, "radio-browser-v1.json.gz");
@@ -838,7 +957,7 @@ sealed class Fixture : HttpMessageHandler
     public void Text(string uri, string text, string type = "text/html") => fixtures[uri] = () =>
         new(HttpStatusCode.OK) { Content = new StringContent(text, Encoding.UTF8, type) };
     public void Audio(string uri, byte[] bytes, string? name = null, string? br = null,
-        string type = "audio/mpeg", bool finite = false) => fixtures[uri] = () =>
+        string type = "audio/mpeg", bool finite = false, string? publicPage = null) => fixtures[uri] = () =>
     {
         var r = new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -847,6 +966,7 @@ sealed class Fixture : HttpMessageHandler
         r.Content.Headers.ContentType = new MediaTypeHeaderValue(type);
         if (name != null) r.Headers.TryAddWithoutValidation("icy-name", name);
         if (br != null) r.Headers.TryAddWithoutValidation("icy-br", br);
+        if (publicPage != null) r.Headers.TryAddWithoutValidation("icy-url", publicPage);
         return r;
     };
     public void Redirect(string uri, string to) => fixtures[uri] = () =>

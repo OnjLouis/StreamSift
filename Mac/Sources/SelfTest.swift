@@ -6,6 +6,14 @@ func selfTest() throws {
         if !passed() { throw UpdateFailure.invalid(label) }
     }
 
+    guard let failureData = SearchCompletionCue.failureData else { throw UpdateFailure.invalid("Missing failure cue") }
+    try require(failureData.count == 18462 && NSSound(data: failureData) != nil, "Failure cue decodes as a sound")
+    try require(SearchCompletionCue.select(verifiedStreams: 0, enabled: true, cancelled: false) == .failure &&
+                SearchCompletionCue.select(verifiedStreams: 1, enabled: true, cancelled: false) == .success &&
+                SearchCompletionCue.select(verifiedStreams: 0, enabled: true, cancelled: true) == nil &&
+                SearchCompletionCue.select(verifiedStreams: 0, enabled: false, cancelled: false) == nil,
+                "Different completion cues for success and failure; no cue for muted or cancelled scans")
+
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("StreamSift-test-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -71,9 +79,11 @@ func selfTest() throws {
     let local = Station(name: "Local", url: "http://127.0.0.1/stream", format: "MP3", bitrate: 320, foundOn: stable.foundOn)
     let temporary = Station(name: "Live", url: "https://radio.example/opaque-session/playlist.m3u8", format: "HLS", bitrate: nil,
                             foundOn: stable.foundOn)
+    let video = Station(name: "Video", url: "https://radio.example/opaque-session/video.mp4", format: "MP4 video", bitrate: nil,
+                        foundOn: stable.foundOn, isVideo: true)
     let view = ResultView(format: "AAC", order: .listenersDescending)
     guard let saved = LastResults.capture(input: "radio.example:9020", mode: .passive,
-                                         stations: [addressed, local, temporary, stable, safe, safe], view: view,
+                                         stations: [addressed, local, temporary, video, stable, safe, safe], view: view,
                                          selection: safe.url) else { throw UpdateFailure.invalid("No restorable streams") }
     try require(saved.stations == [stable, safe], "Only reusable streams are remembered")
     saved.save(to: defaults)
@@ -205,10 +215,15 @@ func selfTest() throws {
         id == MediaPlayerChoice.fastPlay.bundleIdentifier ? fastPlay : id == MediaPlayerChoice.vlc.bundleIdentifier ? vlc : nil
     }
     try require(StreamPreview.target(choice: .automatic, associated: fastPlay,
-                    associatedIdentifier: MediaPlayerChoice.fastPlay.bundleIdentifier, installed: installed)?.0 == .fastPlay &&
+                    associatedIdentifier: MediaPlayerChoice.fastPlay.bundleIdentifier, installed: installed)?.player == .fastPlay &&
                 StreamPreview.target(choice: .vlc, associated: fastPlay,
-                    associatedIdentifier: MediaPlayerChoice.fastPlay.bundleIdentifier, installed: installed)?.1 == vlc,
+                    associatedIdentifier: MediaPlayerChoice.fastPlay.bundleIdentifier, installed: installed)?.app == vlc,
                 "FastPlay association and explicit VLC selection use different native targets")
+    let otherPlayer = root.appendingPathComponent("Other Player.app")
+    let fallback = StreamPreview.target(choice: .automatic, associated: otherPlayer, associatedIdentifier: "test.player", installed: installed)
+    try require(fallback?.app == otherPlayer && fallback?.needsPlaylist == true &&
+                StreamPreview.target(choice: .vlc, associated: otherPlayer, associatedIdentifier: "test.player", installed: { _ in nil })?.app == otherPlayer,
+                "Default playlist apps get a temporary file even when an explicit player is missing")
     let temp = root.appendingPathComponent("handoffs", isDirectory: true)
     let tempFirst = try PlaybackHandoff.stage(row, in: temp)
     let tempSecond = try PlaybackHandoff.stage(row, in: temp)

@@ -26,19 +26,23 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
         if (!PublicNetwork.TryUrl(start.AbsoluteUri, null, out start)) throw new ArgumentException("Invalid public address.");
         var startHost = HostKey(start);
         var startPath = start.AbsolutePath.TrimEnd('/');
+        // Default HTTP/HTTPS sites can be equivalent, but custom ports may be different radio tenants.
         var matches = await FindLinksAsync(ProviderPage, (_, home) => HostKey(home) == startHost &&
+            (start.IsDefaultPort ? home.IsDefaultPort : home.Scheme == start.Scheme && home.Port == start.Port) &&
             (startPath.Length == 0 || home.AbsolutePath.TrimEnd('/') == startPath) ? 2 : 0, cancel);
         return await new Discovery(client).VerifyListedAsync(start, matches.Select(match => match.Link), cancel, progress);
     }
 
     internal async Task<SearchResult> FindByNameAsync(string name, CancellationToken cancel)
     {
-        string query = StationKey(name);
+        string query = StationKey(SearchSequence.StationText(name));
         if (query.Length == 0) return new SearchResult([], 0, 0, false);
+        var compactQuery = SearchSequence.CompactStationKey(query);
         int Score(DirectoryEntry entry, Uri _)
         {
             var key = StationKey(entry.Name ?? "");
             if (key == query) return 2;
+            if (compactQuery.Length >= 4 && SearchSequence.CompactStationKey(key) == compactQuery) return 2;
             return (" " + key + " ").Contains(" " + query + " ", StringComparison.Ordinal) ? 1 : 0;
         }
 

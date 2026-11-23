@@ -10,7 +10,7 @@ import UniformTypeIdentifiers
                                         backing: .buffered, defer: false)
     private let address = NSComboBox()
     private let find = NSButton(title: "Find Streams", target: nil, action: nil)
-    private let findBrowser = NSButton(title: "Find with Browser", target: nil, action: nil)
+    private let findDirectory = NSButton(title: "Look Up in Public Directory", target: nil, action: nil)
     private let cancel = NSButton(title: "Cancel", target: nil, action: nil)
     private let table = StreamTable()
     private let details = DetailTable()
@@ -23,6 +23,7 @@ import UniformTypeIdentifiers
     private var preferences = Preferences()
     private var startSound: NSSound?
     private var doneSound: NSSound?
+    private var failureSound: NSSound?
     private var stations: [Station] = []
     private var allStations: [Station] = []
     private var resultView = ResultView()
@@ -39,6 +40,7 @@ import UniformTypeIdentifiers
         _ = try? PlaybackHandoff.prune()
         startSound = sound(named: "search")
         doneSound = sound(named: "done")
+        failureSound = SearchCompletionCue.failureData.flatMap { NSSound(data: $0) }
         buildMenus()
         buildWindow()
         let restored = restoreLastResults()
@@ -95,16 +97,17 @@ import UniformTypeIdentifiers
               hint: "Enter a public website, stream address, station name or call sign, or choose a recent successful search from the list.")
         find.target = self
         find.action = #selector(findStreams)
-        findBrowser.target = self
-        findBrowser.action = #selector(findWithBrowser)
+        findDirectory.target = self
+        findDirectory.action = #selector(findInDirectory)
         cancel.target = self
         cancel.action = #selector(cancelSearch)
         label("Find Streams", for: find, hint: "Search for live audio without starting a web player.")
-        label("Find with Browser", for: findBrowser, hint: "Look for live audio using a temporary, muted browser. Requires Chrome or Microsoft Edge.")
+        label("Look Up in Public Directory", for: findDirectory,
+              hint: "Look up a station name, call sign or website in public radio directories and verify matching streams.")
         label("Cancel", for: cancel, hint: "Stop the current search. You can also press Escape.")
         let entry = NSStackView(views: [caption, address])
         entry.alignment = .centerY
-        let searchButtons = NSStackView(views: [find, findBrowser, cancel])
+        let searchButtons = NSStackView(views: [find, findDirectory, cancel])
         searchButtons.alignment = .centerY
 
         label("Streams", for: table, hint: "Command+A selects all visible streams, and Command+S saves the selection in one playlist. Return plays one selected stream. F4 reviews the current line. Command+3 moves to Stream Details.")
@@ -205,8 +208,8 @@ import UniformTypeIdentifiers
         ])
         _ = section("Actions", [
             item("Find Streams", #selector(findStreams), "\r"),
-            item("Find with Browser", #selector(findWithBrowser), "\r", modifiers: [.command, .shift]),
             item("Look Up in Public Directory", #selector(findInDirectory), "d", modifiers: [.command, .shift]),
+            item("Find with Browser", #selector(findWithBrowser), "\r", modifiers: [.command, .shift]),
             item("Refresh Results", #selector(refreshResults), "r"), .separator(),
             item("Copy Stream Addresses", #selector(copyAddress)),
             item("Play Stream", #selector(previewStream)),
@@ -228,6 +231,7 @@ import UniformTypeIdentifiers
         NSApp.helpMenu = section("Help", [
             item("Context Help", #selector(focusedHelp), functionOne, modifiers: []),
             item("Open Manual", #selector(openManual)),
+            item("Version History…", #selector(openVersionHistory)),
             item("GitHub Project", #selector(openProject), functionOne),
             item("Donate", #selector(donate))
         ])
@@ -326,14 +330,14 @@ import UniformTypeIdentifiers
         details.canSearch = job == nil
         address.isEnabled = job == nil
         find.isEnabled = job == nil
-        findBrowser.isEnabled = job == nil
+        findDirectory.isEnabled = job == nil
         cancel.isEnabled = job != nil
         let controls = mainKeyOrder
         for (index, view) in controls.enumerated() { view.nextKeyView = controls[(index + 1) % controls.count] }
     }
 
     private var mainKeyOrder: [NSView] {
-        (job == nil ? [address, find, findBrowser] as [NSView] : [cancel]) + (stations.isEmpty ? [] : [table]) +
+        (job == nil ? [address, find, findDirectory] as [NSView] : [cancel]) + (stations.isEmpty ? [] : [table]) +
             (selected == nil ? [] : [details]) + [status]
     }
 
@@ -469,7 +473,8 @@ import UniformTypeIdentifiers
         let running = ScanJob()
         rememberLastResults()
         do {
-            try running.start(input, mode: mode, fallback: preferences.automaticFallback, onFallback: { [weak self, weak running] next in
+            try running.start(input, mode: mode, fallback: preferences.automaticFallback, recentSearches: history.entries,
+                              onFallback: { [weak self, weak running] next in
                 guard let self, job === running, !isCancelling else { return }
                 setStatus("Trying another method. " + next.starting)
             }) { [weak self] result in self?.finished(result, mode: mode, input: input, refreshing: refreshing) }
@@ -496,7 +501,7 @@ import UniformTypeIdentifiers
 
     private func finished(_ result: Result<SearchResult, Error>, mode: SearchMode, input: String, refreshing: Bool) {
         let focused = window.focusedView
-        let moveFocus = focused === cancel || focused === address || focused === find || focused === findBrowser
+        let moveFocus = focused === cancel || focused === address || focused === find || focused === findDirectory
         job = nil
         var message: String
         if isCancelling {
@@ -504,7 +509,8 @@ import UniformTypeIdentifiers
         } else {
             switch result {
             case .success(let found):
-                if history.remember(input, verifiedStreams: found.stations.count, in: defaults) { refreshHistory() }
+                let rememberable = found.entryWasWebsite == true ? found.stations.count : found.stations.filter { $0.isVideo != true }.count
+                if history.remember(input, verifiedStreams: rememberable, in: defaults) { refreshHistory() }
                 let previousFormat = resultView.format
                 if refreshing {
                     allStations = found.stations
@@ -521,7 +527,6 @@ import UniformTypeIdentifiers
                 } else if refreshing, let previousFormat, !allStations.isEmpty {
                     message += " \(previousFormat) is no longer available. Showing all formats."
                 }
-                if preferences.sounds { doneSound?.stop(); doneSound?.play() }
             case .failure(let error):
                 message = refreshing && !stations.isEmpty ? "Refresh could not finish. Previous results kept." :
                     ((error as? StreamError)?.errorDescription ?? StreamError.search.errorDescription ?? "Search failed.")
@@ -531,6 +536,12 @@ import UniformTypeIdentifiers
         let notice = deferredOffer ? " An update is available. Press Shift+F1 to review it." : ""
         deferredOffer = false
         setStatus(message + notice)
+        if let cue = SearchCompletionCue.select(verifiedStreams: (try? result.get().stations.count) ?? 0,
+                                                enabled: preferences.sounds, cancelled: isCancelling) {
+            let sound = cue == .success ? doneSound : failureSound
+            sound?.stop()
+            sound?.play()
+        }
         if moveFocus { window.makeFirstResponder(stations.isEmpty ? status : table) }
     }
 
@@ -698,28 +709,25 @@ import UniformTypeIdentifiers
             return
         }
         let workspace = NSWorkspace.shared
-        let associated = (preferences.mediaPlayer == .automatic ? UTType(filenameExtension: "m3u8") : nil)
-            .flatMap { workspace.urlForApplication(toOpen: $0) }
-        guard let (player, target) = StreamPreview.target(choice: preferences.mediaPlayer, associated: associated,
+        let associated = UTType(filenameExtension: "m3u8").flatMap { workspace.urlForApplication(toOpen: $0) }
+        guard let target = StreamPreview.target(choice: preferences.mediaPlayer, associated: associated,
             associatedIdentifier: associated.flatMap { Bundle(url: $0)?.bundleIdentifier },
             installed: { workspace.urlForApplication(withBundleIdentifier: $0) }) else {
-            let message = preferences.mediaPlayer == .automatic ? "Install VLC or FastPlay." :
-                "\(preferences.mediaPlayer.title) was not found. Choose another media player in Settings."
-            showMessage("Play Stream", message + " Shift+Return saves and opens a playlist in your default player.")
+            showMessage("Play Stream", "No playlist player was found. Choose a media player in Settings or set a default app for .m3u8 files.")
             return
         }
         let playback: URL
-        do { playback = try player == .fastPlay ? PlaybackHandoff.stage(selected) : address }
+        do { playback = try target.needsPlaylist ? PlaybackHandoff.stage(selected) : address }
         catch { showMessage("Could Not Play Stream", error.localizedDescription); return }
         // An explicit app target keeps an HTTP address out of the browser.
-        workspace.open([playback], withApplicationAt: target, configuration: NSWorkspace.OpenConfiguration()) { [weak self] app, error in
+        workspace.open([playback], withApplicationAt: target.app, configuration: NSWorkspace.OpenConfiguration()) { [weak self] app, error in
             DispatchQueue.main.async {
                 if error != nil || app == nil {
-                    if player == .fastPlay { try? FileManager.default.removeItem(at: playback) }
-                    self?.showMessage("Could Not Play Stream", "\(player.title) could not open the stream. Try saving a playlist instead.")
+                    if target.needsPlaylist { try? FileManager.default.removeItem(at: playback) }
+                    self?.showMessage("Could Not Play Stream", "The player could not open the stream. Choose another player in Settings.")
                 } else {
-                    self?.setStatus("Sent to \(player.title).")
-                    if player == .fastPlay {
+                    self?.setStatus("Sent to \(target.player?.title ?? "your default playlist player").")
+                    if target.needsPlaylist {
                         DispatchQueue.main.asyncAfter(deadline: .now() + PlaybackHandoff.retention + 1) {
                             _ = try? PlaybackHandoff.prune()
                         }
@@ -780,6 +788,7 @@ import UniformTypeIdentifiers
     }
 
     @objc private func openProject() { NSWorkspace.shared.open(projectURL) }
+    @objc private func openVersionHistory() { NSWorkspace.shared.open(projectURL.appendingPathComponent("releases")) }
     @objc private func donate() { NSWorkspace.shared.open(URL(string: "https://onj.me/donate")!) }
     @objc private func about() { NSApp.orderFrontStandardAboutPanel(nil) }
     @objc private func openManual() {

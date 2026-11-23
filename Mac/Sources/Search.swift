@@ -21,16 +21,18 @@ enum MediaPlayerChoice: String, CaseIterable {
 
 enum StreamPreview {
     static func target(choice: MediaPlayerChoice, associated: URL?, associatedIdentifier: String?,
-                       installed: (String) -> URL?) -> (MediaPlayerChoice, URL)? {
+                       installed: (String) -> URL?) -> (player: MediaPlayerChoice?, app: URL, needsPlaylist: Bool)? {
         let supported = [MediaPlayerChoice.vlc, .fastPlay]
-        if choice == .automatic, let associated, let associatedIdentifier,
-           let preferred = supported.first(where: { $0.bundleIdentifier == associatedIdentifier }) {
-            return (preferred, associated)
+        var fallback: (player: MediaPlayerChoice?, app: URL, needsPlaylist: Bool)?
+        if let associated, associated.isFileURL, associated.pathExtension == "app", associatedIdentifier != "me.onj.streamsift" {
+            let preferred = supported.first { $0.bundleIdentifier == associatedIdentifier }
+            fallback = (preferred, associated, preferred != .vlc)
+            if choice == .automatic || choice == preferred { return fallback }
         }
         for player in (choice == .automatic ? supported : [choice]) {
-            if let id = player.bundleIdentifier, let path = installed(id) { return (player, path) }
+            if let id = player.bundleIdentifier, let path = installed(id) { return (player, path, player == .fastPlay) }
         }
-        return nil
+        return fallback
     }
 
     static func address(_ station: Station) -> URL? { address(station.url) }
@@ -49,6 +51,7 @@ struct Station: Codable, Equatable {
     let bitrate: Int?
     let foundOn: String
     var listeners: Int?
+    var isVideo: Bool?
 
     func listLabel(named displayName: String) -> String {
         [displayName, format, bitrate.map { "\($0) kbps" }, listeners.map(ResultView.listenerLabel)]
@@ -57,6 +60,7 @@ struct Station: Codable, Equatable {
 }
 
 struct SearchResult: Decodable {
+    let entryWasWebsite: Bool?
     let stations: [Station]
     let requests: Int
     let unreachable: Int
@@ -72,6 +76,19 @@ struct SearchResult: Decodable {
             (unreachable > 0 ? " \(unreachable) unavailable." : "") + (limitReached ? " Search limit reached." : "") +
             ((attempts ?? 0) > 1 ? " Tried \(attempts ?? 0) methods." : "") +
             ((failedMethods ?? 0) > 0 ? " Methods that could not finish: \(failedMethods ?? 0)." : "")
+    }
+}
+
+enum SearchCompletionCue {
+    case success, failure
+
+    static var failureData: Data? {
+        Bundle.main.object(forInfoDictionaryKey: "StreamSiftFailureSound") as? Data
+    }
+
+    static func select(verifiedStreams: Int, enabled: Bool, cancelled: Bool) -> Self? {
+        guard enabled, !cancelled else { return nil }
+        return verifiedStreams > 0 ? .success : .failure
     }
 }
 
@@ -151,10 +168,11 @@ struct ScannerOutput {
 final class ScanJob {
     private let process = Process()
 
-    func start(_ address: String, mode: SearchMode, fallback: Bool, onFallback: @escaping (SearchMode) -> Void,
+    func start(_ address: String, mode: SearchMode, fallback: Bool, recentSearches: [String], onFallback: @escaping (SearchMode) -> Void,
                completed: @escaping (Result<SearchResult, Error>) -> Void) throws {
         guard !address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              address.utf16.count <= 4096, !address.contains("\0") else { throw StreamError.invalidAddress }
+              address.utf16.count <= 4096, !address.contains("\0"), !address.contains(where: \.isNewline)
+        else { throw StreamError.invalidAddress }
         guard let scanner = Bundle.main.url(forAuxiliaryExecutable: "Scanner") else { throw StreamError.search }
         let output = Pipe()
         let input = Pipe()
@@ -164,9 +182,10 @@ final class ScanJob {
         process.standardError = FileHandle.nullDevice
         process.standardInput = input
         try process.run()
-        // The helper reads at most 4097 UTF-16 units and does not start the scan until stdin closes.
+        let recent = mode == .passive ? recentSearches.filter { $0.utf16.count <= 1024 && !$0.contains(where: \.isNewline) }.prefix(10) : []
+        let request = ([address] + recent).joined(separator: "\n")
         do {
-            try input.fileHandleForWriting.write(contentsOf: Data(address.utf8))
+            try input.fileHandleForWriting.write(contentsOf: Data(request.utf8))
             try input.fileHandleForWriting.close()
         } catch {
             try? input.fileHandleForWriting.close()

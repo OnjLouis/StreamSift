@@ -24,11 +24,16 @@ if (selected is not SearchMethod method || (args.Length != 1 && !fallback))
     return 2;
 }
 
-// Use stdin so a stream address with temporary query parameters is not in the process command line.
-char[] input = new char[4097];
+// Use stdin for the search and optional recent websites, never command-line arguments.
+const int SearchLength = 4096, HistoryEntries = 10, HistoryEntryLength = 1024;
+char[] input = new char[SearchLength + 2 + HistoryEntries * (HistoryEntryLength + 2) + 1];
 int length = await Console.In.ReadBlockAsync(input);
 if (length == input.Length) return 3;
-var searchText = new string(input, 0, length);
+var lines = new string(input, 0, length).TrimEnd('\r', '\n').Split('\n');
+var searchText = lines[0].TrimEnd('\r');
+if (searchText.Length > SearchLength || lines.Length > HistoryEntries + 1 ||
+    lines.Skip(1).Any(line => line.TrimEnd('\r').Length > HistoryEntryLength)) return 3;
+var recentSites = method == SearchMethod.Passive ? lines.Skip(1).Select(line => line.TrimEnd('\r')) : null;
 bool nameInput = SearchSequence.CanSearchStation(searchText);
 bool hasAddress = PublicNetwork.TryInput(searchText, out _) && !nameInput;
 bool stationSearch = nameInput && method != SearchMethod.Browser;
@@ -45,7 +50,7 @@ SearchRun run;
 try
 {
     var sequence = new SearchSequence(client);
-    run = stationSearch ? await sequence.FindStationAsync(searchText, cancellation.Token) :
+    run = stationSearch ? await sequence.FindStationAsync(searchText, cancellation.Token, recentSites) :
         await sequence.FindAsync(searchText, method, fallback, cancellation.Token, (next, number) =>
     {
         if (number > 1)
@@ -73,12 +78,14 @@ catch (Exception error) when (method == SearchMethod.Directory && (error is IOEx
 }
 var found = run.Result;
 var output = new Reply(found.Stations.Select(s => new ResultRow(s.Name, s.Url.AbsoluteUri, s.Format, s.Bitrate,
-    s.FoundOn.AbsoluteUri, s.Listeners)).ToArray(), found.Requests, found.Unreachable, found.LimitReached, Argument(run.Method), run.Attempts, run.FailedMethods);
+    s.FoundOn.AbsoluteUri, s.Listeners, s.IsVideo)).ToArray(), found.Requests, found.Unreachable, found.LimitReached,
+    Argument(run.Method), run.Attempts, run.FailedMethods, found.EntryWasWebsite);
 await JsonSerializer.SerializeAsync(Console.OpenStandardOutput(), output, ScannerJson.Default.Reply);
 return 0;
 
-internal sealed record ResultRow(string Name, string Url, string Format, int? Bitrate, string FoundOn, int? Listeners);
-internal sealed record Reply(ResultRow[] Stations, int Requests, int Unreachable, bool LimitReached, string Method, int Attempts, int FailedMethods);
+internal sealed record ResultRow(string Name, string Url, string Format, int? Bitrate, string FoundOn, int? Listeners, bool IsVideo);
+internal sealed record Reply(ResultRow[] Stations, int Requests, int Unreachable, bool LimitReached, string Method, int Attempts, int FailedMethods,
+    bool EntryWasWebsite);
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(Reply))]

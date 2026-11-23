@@ -8,9 +8,10 @@ internal enum PlayerChoice { Automatic, Vlc, Foobar2000, FastPlay }
 
 internal static class StreamPreview
 {
-    internal sealed record Player(string Executable, PlayerChoice Kind)
+    internal sealed record Player(string Executable, PlayerChoice Kind, bool ShellPlaylist = false)
     {
-        internal string Name => DisplayName(Kind);
+        internal string Name => ShellPlaylist ? "your default playlist player" : DisplayName(Kind);
+        internal bool NeedsPlaylist => ShellPlaylist || Kind == PlayerChoice.FastPlay;
     }
 
     internal static string DisplayName(PlayerChoice choice) => choice switch
@@ -23,10 +24,10 @@ internal static class StreamPreview
 
     internal static Player? FindPlayer(PlayerChoice choice)
     {
-        const uint associatedExecutable = 2;
+        const uint associatedExecutable = 2, ignoreUnknown = 0x400;
         var associated = new StringBuilder(4096);
         uint length = (uint)associated.Capacity;
-        string? association = AssocQueryString(0, associatedExecutable, ".m3u8", null, associated, ref length) == 0
+        string? association = AssocQueryString(ignoreUnknown, associatedExecutable, ".m3u8", null, associated, ref length) == 0
             ? associated.ToString() : null;
         var roots = new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86) }.Where(root => root.Length != 0).Distinct();
@@ -36,7 +37,10 @@ internal static class StreamPreview
     internal static Player? ResolvePlayer(PlayerChoice choice, string? association, IEnumerable<string> roots)
     {
         bool Matches(PlayerChoice kind) => choice == PlayerChoice.Automatic || choice == kind;
-        if (association != null && Supported(association) is Player preferred && Matches(preferred.Kind)) return preferred;
+        Player? preferred = association != null && Path.IsPathFullyQualified(association) && File.Exists(association) &&
+            !Path.GetFileName(association).Equals("StreamSift.exe", StringComparison.OrdinalIgnoreCase)
+            ? Supported(association) ?? new Player(association, PlayerChoice.Automatic, ShellPlaylist: true) : null;
+        if (preferred != null && Matches(preferred.Kind)) return preferred;
 
         (PlayerChoice Kind, string Relative)[] candidates =
             [(PlayerChoice.Vlc, Path.Combine("VideoLAN", "VLC", "vlc.exe")),
@@ -51,7 +55,7 @@ internal static class StreamPreview
                 if (Supported(path) is Player installed) return installed;
             }
         }
-        return null;
+        return preferred;
     }
 
     private static Player? Supported(string path)
@@ -70,17 +74,16 @@ internal static class StreamPreview
     {
         if (!PublicNetwork.TryUrl(station.Url.AbsoluteUri, null, out var address))
             throw new InvalidDataException("The stream does not have a public HTTP or HTTPS address.");
-        var start = new ProcessStartInfo(player.Executable) { UseShellExecute = false };
-        if (player.Kind == PlayerChoice.FastPlay)
+        if (player.NeedsPlaylist)
         {
             if (preparedPlaylist == null || !Path.IsPathFullyQualified(preparedPlaylist) ||
                 !Path.GetExtension(preparedPlaylist).Equals(".m3u8", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("A temporary playlist is required for FastPlay.");
-            start.ArgumentList.Add(preparedPlaylist);
-            return start;
+                throw new InvalidDataException("A temporary playlist is required for this player.");
+            if (player.ShellPlaylist) return new ProcessStartInfo(preparedPlaylist) { UseShellExecute = true };
         }
+        var start = new ProcessStartInfo(player.Executable) { UseShellExecute = false };
         if (player.Kind == PlayerChoice.Foobar2000) start.ArgumentList.Add("/immediate");
-        start.ArgumentList.Add(address.AbsoluteUri);
+        start.ArgumentList.Add(player.NeedsPlaylist ? preparedPlaylist! : address.AbsoluteUri);
         return start;
     }
 
@@ -180,7 +183,7 @@ internal static class FoobarHandoff
     {
         for (string? parent = Path.GetFullPath(folder); parent != null; parent = Path.GetDirectoryName(parent))
             if (Directory.Exists(parent) && (File.GetAttributes(parent) & FileAttributes.ReparsePoint) != 0)
-                throw new IOException("The Foobar2000 handoff folder is redirected.");
+                throw new IOException("The temporary playlist folder is redirected.");
         if (!Directory.Exists(folder)) return 0;
         int remaining = 0;
         foreach (var path in Directory.EnumerateFiles(folder, "handoff-*.m3u8").Take(MaxPending * 3))

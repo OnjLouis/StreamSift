@@ -81,6 +81,20 @@ public static class PublicNetwork
         ConnectCallback = Connect
     }) { Timeout = Timeout.InfiniteTimeSpan };
 
+    internal static async Task<bool> ArePublicMediaHostsAsync(string[] hosts, CancellationToken token)
+    {
+        try
+        {
+            foreach (string host in hosts)
+            {
+                var addresses = await Dns.GetHostAddressesAsync(host, token).ConfigureAwait(false);
+                if (addresses.Length == 0 || addresses.Any(address => !IsPublic(address))) return false;
+            }
+            return true;
+        }
+        catch (SocketException) { return false; }
+    }
+
     private static async ValueTask<Stream> Connect(SocketsHttpConnectionContext context, CancellationToken token)
     {
         var addresses = await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, token);

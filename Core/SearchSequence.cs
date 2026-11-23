@@ -6,6 +6,8 @@ public sealed record SearchRun(SearchResult Result, SearchMethod Method, int Att
 
 public sealed class SearchSequence(HttpClient client, string? cacheDirectory = null)
 {
+    private static readonly SearchMethod[] FallbackOrder = [SearchMethod.Passive, SearchMethod.Directory, SearchMethod.Browser];
+
     public Task<SearchRun> FindAsync(string input, SearchMethod first, bool fallback, CancellationToken cancel,
         Action<SearchMethod, int>? starting = null)
     {
@@ -24,7 +26,7 @@ public sealed class SearchSequence(HttpClient client, string? cacheDirectory = n
 
     public static bool CanSearchStation(string input)
     {
-        input = input.Trim();
+        input = StationText(input);
         // A bare FM frequency such as 104.3 can also parse as a shortened IPv4 address.
         if (input.Length is >= 4 and <= 6 && input.Count(c => c == '.') == 1 &&
             input.All(c => char.IsAsciiDigit(c) || c == '.') &&
@@ -37,12 +39,55 @@ public sealed class SearchSequence(HttpClient client, string? cacheDirectory = n
             !PublicNetwork.TryInput(input, out _);
     }
 
-    public async Task<SearchRun> FindStationAsync(string name, CancellationToken cancel)
+    internal static string StationText(string input)
+    {
+        input = input.Trim();
+        // A bare filename is a station-name hint, not a website or a codec filter.
+        int dot = input.IndexOf('.');
+        if (dot > 0 && input[dot..].ToLowerInvariant() is ".mp3" or ".aac" or ".flac" or ".ogg" or ".opus" &&
+            !input.Contains('/') && !input.Contains('\\') && !input.Contains(':')) return input[..dot].TrimEnd();
+        return input;
+    }
+
+    public async Task<SearchRun> FindStationAsync(string name, CancellationToken cancel,
+        IEnumerable<string>? recentSearches = null)
     {
         if (!CanSearchStation(name)) throw new ArgumentException("Invalid station name.");
+        SearchResult? fromWebsite = null;
+        if (FindRecentSite(StationText(name), recentSearches) is Uri site)
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+            deadline.CancelAfter(TimeSpan.FromSeconds(12));
+            try
+            {
+                fromWebsite = await new Discovery(client).FindAsync(site, deadline.Token).ConfigureAwait(false);
+                if (fromWebsite.Stations.Count > 0) return new SearchRun(fromWebsite, SearchMethod.Passive, 1, 0);
+            }
+            catch (OperationCanceledException) when (!cancel.IsCancellationRequested) { }
+        }
         var result = await new DirectoryDiscovery(client, cacheDirectory).FindByNameAsync(name, cancel).ConfigureAwait(false);
-        return new SearchRun(result, SearchMethod.Directory, 1, 0);
+        return new SearchRun(result with { Requests = result.Requests + (fromWebsite?.Requests ?? 0),
+            Unreachable = result.Unreachable + (fromWebsite?.Unreachable ?? 0),
+            LimitReached = result.LimitReached || (fromWebsite?.LimitReached ?? false) },
+            SearchMethod.Directory, fromWebsite != null ? 2 : 1, 0);
     }
+
+    private static Uri? FindRecentSite(string name, IEnumerable<string>? searched)
+    {
+        var key = CompactStationKey(name);
+        if (key.Length < 3 || searched == null) return null;
+        foreach (var entry in searched.Take(10))
+        {
+            if (!PublicNetwork.TryInput(entry, out var site) || site.HostNameType != UriHostNameType.Dns ||
+                !site.IsDefaultPort || site.AbsolutePath != "/" || site.Query.Length != 0 || entry.Contains('#')) continue;
+            var host = site.IdnHost.StartsWith("www.", StringComparison.Ordinal) ? site.IdnHost[4..] : site.IdnHost;
+            int dot = host.IndexOf('.');
+            if (dot > 0 && CompactStationKey(host[..dot]) == key) return site;
+        }
+        return null;
+    }
+
+    internal static string CompactStationKey(string name) => new(name.ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
 
     private Task<SearchResult> RunMethod(Uri address, Uri? plain, SearchMethod method, CancellationToken token) => method switch
     {
@@ -57,7 +102,7 @@ public sealed class SearchSequence(HttpClient client, string? cacheDirectory = n
         Func<SearchMethod, CancellationToken, Task<SearchResult>> scan, CancellationToken cancel,
         Action<SearchMethod, int>? starting = null)
     {
-        IEnumerable<SearchMethod> methods = fallback ? new[] { first }.Concat(Enum.GetValues<SearchMethod>().Where(method => method != first)) : [first];
+        IEnumerable<SearchMethod> methods = fallback ? new[] { first }.Concat(FallbackOrder.Where(method => method != first)) : [first];
         int attempts = 0, failed = 0, requests = 0, unavailable = 0;
         bool limitReached = false;
         SearchMethod last = first;

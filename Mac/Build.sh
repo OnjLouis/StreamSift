@@ -28,7 +28,10 @@ done
 xcrun lipo -create "$scratch/StreamSift-arm64" "$scratch/StreamSift-x64" -output "$app/Contents/MacOS/StreamSift"
 xcrun lipo -create "${scanners[@]}" -output "$app/Contents/MacOS/Scanner"
 cp "$source_dir/Mac/Info.plist" "$app/Contents/Info.plist"
-cp "$source_dir/Mac/Manual.html" "$source_dir/AngleSharp-LICENSE.txt" "$source_dir"/Windows/Assets/*.wav "$app/Contents/Resources/"
+# Embed the third sound without adding an archive entry that older updaters reject.
+cue="$(/usr/bin/base64 -i "$source_dir/Windows/Assets/error.wav" | /usr/bin/tr -d '\r\n')"
+/usr/bin/plutil -insert StreamSiftFailureSound -data "$cue" "$app/Contents/Info.plist"
+cp "$source_dir/Mac/Manual.html" "$source_dir/AngleSharp-LICENSE.txt" "$source_dir"/Windows/Assets/{search,done}.wav "$app/Contents/Resources/"
 dotnet_executable="$(command -v "${DOTNET:-dotnet}")"
 dotnet_root="$(dirname "$(realpath "$dotnet_executable")")"
 cp "$dotnet_root/LICENSE.txt" "$app/Contents/Resources/DotNet-LICENSE.txt"

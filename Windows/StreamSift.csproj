@@ -5,7 +5,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Version>1.2.18</Version>
+    <Version>1.2.22</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Product>StreamSift</Product>
     <Company>OnjLouis</Company>
@@ -17,6 +17,7 @@
     <ProjectReference Include="../Vendor/Onj.SignedUpdater/Onj.SignedUpdater.csproj" />
     <EmbeddedResource Include="Assets/search.wav" LogicalName="StreamSift.Sounds.search.wav" />
     <EmbeddedResource Include="Assets/done.wav" LogicalName="StreamSift.Sounds.done.wav" />
+    <EmbeddedResource Include="Assets/error.wav" LogicalName="StreamSift.Sounds.error.wav" />
     <EmbeddedResource Include="$(StreamSiftUpdatePublicKey)" LogicalName="StreamSift.UpdatePublicKey.xml" Condition="'$(StreamSiftUpdatePublicKey)' != ''" />
     <None Include="../Vendor/Onj.SignedUpdater/LICENSE" Link="SignedUpdater-LICENSE.txt" CopyToPublishDirectory="PreserveNewest" />
     <None Include="../Manual.html" Link="Manual.html" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
