@@ -10,8 +10,28 @@ public sealed class SearchSequence(HttpClient client, string? cacheDirectory = n
         Action<SearchMethod, int>? starting = null)
     {
         if (!PublicNetwork.TryInput(input, out var address)) throw new ArgumentException("Invalid public address.");
+        address = PreferredVideoPage(address);
         var plain = ImplicitHttpAlternative(input, address);
         return RunAsync(first, fallback, (method, token) => RunMethod(address, plain, method, token), cancel, starting);
+    }
+
+    internal static Uri PreferredVideoPage(Uri address)
+    {
+        // NBC10 Boston's advertised domains redirect to its canonical homepage. The
+        // station's public live player is on /watch/, which avoids a long news crawl.
+        if (address.IsDefaultPort && address.AbsolutePath == "/" && address.Query.Length == 0 &&
+            address.IdnHost is "nbc10boston.com" or "www.nbc10boston.com" or "nbcboston.com" or "www.nbcboston.com")
+            return new Uri("https://www.nbcboston.com/watch/");
+        if (address.IsDefaultPort && address.AbsolutePath == "/" && address.Query.Length == 0)
+        {
+            if (address.IdnHost is "cbsboston.com" or "www.cbsboston.com")
+                return new Uri("https://www.cbsnews.com/boston/live/news-local-news/");
+            if (address.IdnHost is "boston25.com" or "www.boston25.com" or "boston25news.com" or "www.boston25news.com")
+                return new Uri("https://www.boston25news.com/video/");
+            if (address.IdnHost is "wcvb.com" or "www.wcvb.com")
+                return new Uri("https://www.wcvb.com/nowcast");
+        }
+        return address;
     }
 
     internal static Uri? ImplicitHttpAlternative(string input, Uri address)

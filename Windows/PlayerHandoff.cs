@@ -4,7 +4,7 @@ using System.Text;
 
 namespace StreamSift;
 
-internal enum PlayerChoice { Automatic, Vlc, Foobar2000, FastPlay }
+internal enum PlayerChoice { Automatic, Vlc, Foobar2000, FastPlay, Winamp }
 
 internal static class StreamPreview
 {
@@ -18,11 +18,15 @@ internal static class StreamPreview
         PlayerChoice.Vlc => "VLC",
         PlayerChoice.Foobar2000 => "Foobar2000",
         PlayerChoice.FastPlay => "FastPlay",
+        PlayerChoice.Winamp => "Winamp",
         _ => "Automatic"
     };
 
     internal static Player? FindPlayer(PlayerChoice choice)
     {
+        if (choice is PlayerChoice.Automatic or PlayerChoice.Vlc &&
+            Supported(Path.Combine(AppContext.BaseDirectory, "VLC", "vlc.exe")) is Player bundled)
+            return bundled;
         const uint associatedExecutable = 2;
         var associated = new StringBuilder(4096);
         uint length = (uint)associated.Capacity;
@@ -41,7 +45,8 @@ internal static class StreamPreview
         (PlayerChoice Kind, string Relative)[] candidates =
             [(PlayerChoice.Vlc, Path.Combine("VideoLAN", "VLC", "vlc.exe")),
              (PlayerChoice.Foobar2000, Path.Combine("foobar2000", "foobar2000.exe")),
-             (PlayerChoice.FastPlay, Path.Combine("FastPlay", "FastPlay.exe"))];
+             (PlayerChoice.FastPlay, Path.Combine("FastPlay", "FastPlay.exe")),
+             (PlayerChoice.Winamp, Path.Combine("Winamp", "winamp.exe"))];
         foreach (var (kind, relative) in candidates)
         {
             if (!Matches(kind)) continue;
@@ -62,6 +67,7 @@ internal static class StreamPreview
             "vlc.exe" => new Player(path, PlayerChoice.Vlc),
             "foobar2000.exe" => new Player(path, PlayerChoice.Foobar2000),
             "fastplay.exe" => new Player(path, PlayerChoice.FastPlay),
+            "winamp.exe" => new Player(path, PlayerChoice.Winamp),
             _ => null
         };
     }

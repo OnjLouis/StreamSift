@@ -88,6 +88,20 @@ void Require(bool condition, string message)
     checks++;
 }
 
+Require(SearchSequence.PreferredVideoPage(new Uri("https://www.nbc10boston.com/")).AbsoluteUri == "https://www.nbcboston.com/watch/" &&
+    SearchSequence.PreferredVideoPage(new Uri("https://www.nbcboston.com/news/")).AbsolutePath == "/news/", "NBC Boston homepage uses its public watch page.");
+
+Require(SearchSequence.PreferredVideoPage(new Uri("https://cbsboston.com/")).AbsoluteUri == "https://www.cbsnews.com/boston/live/news-local-news/" &&
+    SearchSequence.PreferredVideoPage(new Uri("https://boston25.com/")).AbsoluteUri == "https://www.boston25news.com/video/" &&
+    SearchSequence.PreferredVideoPage(new Uri("https://wcvb.com/")).AbsoluteUri == "https://www.wcvb.com/nowcast", "Boston station homepage aliases.");
+var qualityLow = new Uri("https://streaming.hearstdigitalstudios.com/asset/video_16x9_240p_h264_sd.mp4");
+var qualityHigh = new Uri("https://streaming.hearstdigitalstudios.com/asset/video_16x9_1080p_h264_hd.mp4");
+Require(Discovery.ResultKey(qualityLow) == Discovery.ResultKey(qualityHigh) && Discovery.VideoQuality(qualityHigh) > Discovery.VideoQuality(qualityLow) &&
+    Discovery.ResultKey(new Uri("https://streaming.hearstdigitalstudios.com/other/video_16x9_1080p_h264_hd.mp4")) != Discovery.ResultKey(qualityHigh),
+    "Collapse known quality variants without collapsing different clips.");
+var daiFirst = new Uri("https://dai.google.com/linear/hls/pa/event/channel-a/stream/session1:ABC/master.m3u8");
+var daiSecond = new Uri("https://dai.google.com/linear/hls/pa/event/channel-a/stream/session2:XYZ/master.m3u8");
+Require(Discovery.ResultKey(daiFirst) == Discovery.ResultKey(daiSecond) && Discovery.ResultKey(new Uri("https://dai.google.com/linear/hls/pa/event/channel-b/stream/session1:ABC/master.m3u8")) != Discovery.ResultKey(daiFirst), "Collapse delivery sessions but keep different channels.");
 var fallbackUri = new Uri("https://radio.example/live");
 var fallbackHit = new SearchResult([new Station("Verified", fallbackUri, "MP3", 128, fallbackUri, false)], 2, 0, false);
 var fallbackMiss = new SearchResult([], 3, 1, true);
@@ -198,6 +212,51 @@ Require(!handler.Seen.Any(x => x.Contains("seg.") || x.Contains("video.m3u8") ||
 Require(results.Requests == handler.Seen.Count && !results.LimitReached, "Requests were not tracked correctly.");
 Require(results.Stations.All(x => !x.Url.AbsoluteUri.Contains("oldshow") && !x.Url.AbsoluteUri.Contains("vod")), "Recording returned as live.");
 Require(results.Unreachable == 1, "Blocked redirect not counted.");
+
+handler.Text("https://homepage.example/", """<title>News</title><a href="https://metadata.example/">Other</a><a href="/watch/">Watch 24/7</a>""");
+handler.Redirect("https://homepage.example/watch/", "https://metadata.example/");
+handler.Text("https://metadata.example/", """
+    <title>Metadata news</title><div data-videos='[{"video":{"meta":{"mpx_is_livestream":"1","m3u8_url":"https://news.example/live.m3u8"}}}]'></div>
+    """);
+handler.Text("https://news.example/", """
+    <title>News Live</title><video src="/live.m3u8"></video>
+    <video><source src="/clip.mp4"></video>
+    <video src="/encrypted.m3u8"></video>
+    """);
+handler.Text("https://news.example/live.m3u8", "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,CODECS=\"avc1.123,mp4a.40.2\"\nvideo.m3u8", "application/vnd.apple.mpegurl");
+handler.Text("https://news.example/video.m3u8", "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nsegment.ts", "application/vnd.apple.mpegurl");
+handler.Text("https://news.example/encrypted.m3u8", "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"https://key.example/key\"\n#EXTINF:6,\nsegment.ts", "application/vnd.apple.mpegurl");
+handler.Audio("https://news.example/clip.mp4", new byte[] { 0, 0, 0, 20, 102, 116, 121, 112, 105, 115, 111, 109 }, type: "video/mp4", finite: true);
+var videoResults = await engine.FindAsync(new Uri("https://news.example/"), CancellationToken.None);
+Require(videoResults.Stations.Count == 2 && videoResults.Stations.Any(x => x.IsVideo && x.Format == "HLS video" && x.Url.AbsolutePath == "/live.m3u8") &&
+    videoResults.Stations.Any(x => x.IsVideo && x.Format == "MP4 video"), "Video HLS master and finite MP4 discovery.");
+handler.Text("https://www.wcvb.com/nowcast", """<script>window.state={"nowcastData":{"enabled":true,"is_live":false,"is_ondemand":true,"stream":"https://news.example/replay.m3u8"}}</script><video src="https://news.example/clip.mp4"></video>""");
+handler.Text("https://news.example/replay.m3u8", "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-KEY:METHOD=AES-128,URI=\"https://keys.example/key\"\n#EXTINF:6,\nsegment.ts\n#EXT-X-ENDLIST", "application/vnd.apple.mpegurl");
+var wcvbReplay = await engine.FindAsync(new Uri("https://www.wcvb.com/nowcast"), CancellationToken.None);
+Require(wcvbReplay.Stations is [{ IsVideo: true, Format: "HLS video replay" }] && !handler.Seen.Any(x => x.Contains("keys.example")), "WCVB replay and public AES-128 key handling.");
+handler.Text("https://quality.example/", """<video src="https://streaming.hearstdigitalstudios.com/asset/video_16x9_240p_h264_sd.mp4"></video><video src="https://streaming.hearstdigitalstudios.com/asset/video_16x9_1080p_h264_hd.mp4"></video>""");
+var mp4Bytes = new byte[] { 0, 0, 0, 20, 102, 116, 121, 112, 105, 115, 111, 109 };
+handler.Audio(qualityLow.AbsoluteUri, mp4Bytes, type: "video/mp4", finite: true);
+handler.Audio(qualityHigh.AbsoluteUri, mp4Bytes, type: "video/mp4", finite: true);
+var qualityResults = await engine.FindAsync(new Uri("https://quality.example/"), CancellationToken.None);
+Require(qualityResults.Stations is [{ IsVideo: true }] && qualityResults.Stations[0].Url == qualityHigh &&
+    !handler.Seen.Contains(qualityLow.AbsoluteUri), "Choose the highest available quality without requesting duplicate renditions.");
+handler.Text("https://variants.example/", """<video src="/master.m3u8"></video>""");
+handler.Text("https://variants.example/master.m3u8", "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,CODECS=\"avc1.123,mp4a.40.2\"\na.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2,CODECS=\"avc1.123,mp4a.40.2\"\nb.m3u8", "application/vnd.apple.mpegurl");
+handler.Text("https://variants.example/a.m3u8", "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nseg.ts", "application/vnd.apple.mpegurl");
+handler.Text("https://variants.example/b.m3u8", "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nseg.ts", "application/vnd.apple.mpegurl");
+var variants = await engine.FindAsync(new Uri("https://variants.example/"), CancellationToken.None);
+Require(variants.Stations.Count == 1 && variants.Stations[0].Url.AbsolutePath == "/master.m3u8" && !handler.Seen.Contains("https://variants.example/b.m3u8"), "Verify only one successful rendition of a master stream.");
+handler.Text("https://keytest.example/", """<video src="/private-key.m3u8"></video>""");
+handler.Text("https://keytest.example/private-key.m3u8", "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-KEY:METHOD=AES-128,URI=\"http://127.0.0.1/key\"\n#EXTINF:6,\nseg.ts", "application/vnd.apple.mpegurl");
+var privateKeyVideo = await engine.FindAsync(new Uri("https://keytest.example/"), CancellationToken.None);
+Require(privateKeyVideo.Stations.Count == 0 && !handler.Seen.Contains("http://127.0.0.1/key"), "Reject video playlists with a private key address.");
+var homepageVideo = await engine.FindAsync(new Uri("https://homepage.example/"), CancellationToken.None);
+Require(homepageVideo.Stations is [{ IsVideo: true, Format: "HLS video" }], "Follow a station homepage watch link.");
+var metadataVideo = await engine.FindAsync(new Uri("https://metadata.example/"), CancellationToken.None);
+Require(metadataVideo.Stations is [{ IsVideo: true, Format: "HLS video" }] && metadataVideo.Stations[0].Url.AbsolutePath == "/live.m3u8",
+    "Live video in encoded player metadata.");
+Require(!handler.Seen.Any(x => x.Contains("segment.ts") || x.Contains("key.example")), "Video discovery fetched a segment or encryption key.");
 
 handler.Text("https://radio.example/m3u", "#EXTM3U\n#EXTINF:-1,Relative station\n/ownstream\n", "audio/x-mpegurl");
 handler.Audio("https://radio.example/ownstream", mp3);
@@ -804,7 +863,7 @@ Require(locus.Stations is [{ Name: "Active microphone" }] &&
 handler.Text("https://radio.example/large", "<title>Many links</title>" + string.Concat(Enumerable.Range(0, 150)
     .Select(i => $"<audio src='/stream{i}.mp3'></audio>")));
 var bounded = await engine.FindAsync(new Uri("https://radio.example/large"), CancellationToken.None);
-Require(bounded is { Requests: 36, LimitReached: true }, "Request budget.");
+Require(bounded is { Requests: 120, LimitReached: true }, "Request budget.");
 
 using var cancellation = new CancellationTokenSource();
 handler.OnRequest = () => cancellation.Cancel();

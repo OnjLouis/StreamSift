@@ -1,24 +1,25 @@
 using System.Net;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace StreamSift;
 
-public sealed record Station(string Name, Uri Url, string Format, int? Bitrate, Uri FoundOn, bool IsHls, int? Listeners = null);
+public sealed record Station(string Name, Uri Url, string Format, int? Bitrate, Uri FoundOn, bool IsHls, int? Listeners = null, bool IsVideo = false);
 public sealed record SearchResult(IReadOnlyList<Station> Stations, int Requests, int Unreachable, bool LimitReached);
 
-internal enum LinkKind { Audio, Playlist, Player, DedicatedPlayer, Script, Catalogue, ServerStatus }
+internal enum LinkKind { Audio, Video, Playlist, Player, DedicatedPlayer, Script, Catalogue, ServerStatus }
 internal enum NameOrigin { Inferred, Directory, Playlist }
 internal sealed record Link(Uri Url, Uri FoundOn, LinkKind Kind, string? Name = null, bool AudioHint = false,
     NameOrigin NameOrigin = NameOrigin.Inferred, Uri? Wrapper = null, bool KeepAddress = false, int? Listeners = null,
-    string? TuneInId = null);
+    string? TuneInId = null, bool VideoHint = false, Uri? VideoMaster = null, bool VideoReplay = false);
 
 public sealed class Discovery(HttpClient client)
 {
-    private const int PageRequests = 36, PageResults = 24, CatalogueRequests = 116, CatalogueResults = 96;
-    private const int MaxLinks = 200, MaxRedirects = 5;
-    private const int TextLimit = 768 * 1024, AudioProbeLimit = 4096;
+    private const int PageRequests = 120, PageResults = 64, CatalogueRequests = 116, CatalogueResults = 96;
+    private const int MaxLinks = 350, MaxRedirects = 5;
+    private const int TextLimit = 2 * 1024 * 1024, AudioProbeLimit = 4096;
     private const int ServerProbeBatch = 4, ServerRequestLimit = 600;
-    private static readonly TimeSpan ScanLimit = TimeSpan.FromSeconds(38), RequestLimit = TimeSpan.FromSeconds(7);
+    private static readonly TimeSpan ScanLimit = TimeSpan.FromSeconds(75), RequestLimit = TimeSpan.FromSeconds(7);
     private static readonly TimeSpan ServerScanLimit = TimeSpan.FromSeconds(65), ServerProbeLimit = TimeSpan.FromSeconds(4);
 
     public Task<SearchResult> FindAsync(Uri start, CancellationToken cancel, IProgress<int>? progress = null) =>
@@ -29,7 +30,8 @@ public sealed class Discovery(HttpClient client)
 
     internal Task<SearchResult> VerifyObservedAsync(Uri start, IEnumerable<Uri> candidates,
         CancellationToken cancel, IProgress<int>? progress = null) =>
-        VerifyListedAsync(start, candidates.Select(candidate => new Link(candidate, start, LinkKind.Audio, start.IdnHost, true)),
+        VerifyListedAsync(start, candidates.Select(candidate => new Link(candidate, start, LinkKind.Audio, start.IdnHost,
+            !candidate.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase))),
             cancel, progress);
 
     internal Task<SearchResult> VerifyListedAsync(Uri start, IEnumerable<Link> candidates,
@@ -43,6 +45,7 @@ public sealed class Discovery(HttpClient client)
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var names = new Dictionary<string, Link>(StringComparer.Ordinal);
         var results = new Dictionary<string, Station>(StringComparer.Ordinal);
+        var verifiedVideoMasters = new HashSet<string>(StringComparer.Ordinal);
         int requests = 0, serverRequests = 0, failures = 0;
         int requestLimit = PageRequests, resultLimit = PageResults;
         Uri? site = null;
@@ -93,6 +96,8 @@ public sealed class Discovery(HttpClient client)
                 try
                 {
                     if (!PublicNetwork.TryUrl(item.Link.Url.AbsoluteUri, null, out var uri)) continue;
+                    if (item.Link.VideoMaster is Uri verifiedMaster && verifiedVideoMasters.Contains(ResultKey(verifiedMaster))) continue;
+                    if (item.Link.Kind == LinkKind.Video && results.ContainsKey(ResultKey(uri))) continue;
                     if (SomaMount(uri) is string mount && results.TryGetValue(mount, out var existing) &&
                         (existing.Url.Scheme == "https" || uri.Scheme == "http")) continue;
                     using var response = await Fetch(uri, () =>
@@ -121,7 +126,15 @@ public sealed class Discovery(HttpClient client)
                     await using var body = await response.Content.ReadAsStreamAsync(token);
 
                     // Some Icecast mounts have no extension, and some playlists have a generic MIME type.
-                    if (IsAudioType(kind) || kind is "application/octet-stream" or "application/ogg" || stationName != null || kind.Length == 0)
+                    if (kind is "video/mp4" or "video/webm" ||
+                        (item.Link.Kind == LinkKind.Video && kind is "" or "application/octet-stream"))
+                    {
+                        var prefix = await Read(body, AudioProbeLimit, token);
+                        string? format = prefix.Length >= 12 && Encoding.ASCII.GetString(prefix, 4, 4) == "ftyp" ? "MP4 video" :
+                            prefix.Length >= 4 && prefix[0] == 0x1a && prefix[1] == 0x45 && prefix[2] == 0xdf && prefix[3] == 0xa3 ? "WebM video" : null;
+                        if (format != null) { Add(final, item.Link, stationName, format, null, false, true); verified = true; }
+                    }
+                    else if (IsAudioType(kind) || kind is "application/octet-stream" or "application/ogg" || stationName != null || kind.Length == 0)
                     {
                         var prefix = await Read(body, AudioProbeLimit, token, stopOnAudio: true);
                         var codec = Sniff(prefix);
@@ -194,12 +207,13 @@ public sealed class Discovery(HttpClient client)
                 LinkKind.ServerStatus => -3,
                 LinkKind.Catalogue => -2,
                 LinkKind.Audio when link.AudioHint => -1,
+                LinkKind.Video => -1,
                 LinkKind.DedicatedPlayer or LinkKind.Script => 0,
                 LinkKind.Audio => 1,
                 LinkKind.Playlist => 2,
                 _ => 3
             };
-            todo.Enqueue((link, depth), (rank, seen.Count));
+            todo.Enqueue((link, depth), (rank, seen.Count - VideoQuality(link.Url) * 1000));
         }
 
         void Evaluate(string text, string type, Uri address, Link source, int depth)
@@ -217,6 +231,12 @@ public sealed class Discovery(HttpClient client)
                 resultLimit = CatalogueResults;
             }
             if (info.LiveHls) Add(address, source, null, "HLS", null, true);
+            if (info.VideoHls)
+            {
+                var master = source.VideoMaster ?? address;
+                Add(master, source, null, source.VideoReplay ? "HLS video replay" : "HLS video", null, true, true);
+                verifiedVideoMasters.Add(ResultKey(master));
+            }
             foreach (var link in info.Links) Queue(link, depth + 1);
         }
 
@@ -250,16 +270,18 @@ public sealed class Discovery(HttpClient client)
             }
         }
 
-        void Add(Uri address, Link source, string? name, string format, int? bitrate, bool hls)
+        void Add(Uri address, Link source, string? name, string format, int? bitrate, bool hls, bool video = false)
         {
             var stable = names.GetValueOrDefault(source.Url.AbsoluteUri) ?? names.GetValueOrDefault(address.AbsoluteUri);
             var title = stable?.Name ?? Extraction.StationName(name) ?? Extraction.StationName(source.Name) ??
                 Extraction.Label(address.Segments.LastOrDefault()?.Trim('/')) ?? address.Host;
-            var key = SomaMount(address) ?? address.AbsoluteUri;
+            var key = video && hls && source.FoundOn.IdnHost == "www.cbsnews.com" &&
+                source.FoundOn.AbsolutePath.Contains("/live/", StringComparison.OrdinalIgnoreCase)
+                ? "cbs-video:" + source.FoundOn.AbsoluteUri : ResultKey(address);
             var playbackAddress = source.KeepAddress || (observed != null && source.Kind == LinkKind.Audio)
                 ? source.Url : address;
             var station = new Station(title, playbackAddress, format, bitrate, stable?.FoundOn ?? source.FoundOn, hls,
-                stable?.Listeners ?? source.Listeners);
+                stable?.Listeners ?? source.Listeners, video);
             if (!results.TryAdd(key, station) && address.Scheme == "https" && results[key].Url.Scheme == "http") results[key] = station;
         }
     }
@@ -287,6 +309,31 @@ public sealed class Discovery(HttpClient client)
             return (new Station(name, mount.Address, format, bitrate, listing, false, mount.Listeners), false);
         }
         catch (Exception e) when (e is HttpRequestException or IOException or OperationCanceledException) { return (null, false); }
+    }
+
+    // Only collapse quality renditions when the provider's path structure identifies
+    // the same asset. Keep query strings, channels, formats and unrelated hosts distinct.
+    private static readonly Regex HearstQuality = new(@"^video_(?:rover_)?(?<aspect>16x9|9x16)_(?<height>\d+)p_(?:h264_)?(?:sd|hd)(?:_\d+_\d+)?\.mp4$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(200));
+    private static readonly Regex CmgQuality = new(@"^file_\d+x(?<height>\d+)-\d+-v\d+(?:_\d+)?\.mp4$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(200));
+    private static readonly Regex DaiSession = new(@"^(/linear/hls/pa/event/[^/]+/stream/)[^/]+(/master\.m3u8)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(200));
+
+    internal static int VideoQuality(Uri uri)
+    {
+        var file = uri.Segments.LastOrDefault() ?? "";
+        var match = uri.IdnHost == "streaming.hearstdigitalstudios.com" ? HearstQuality.Match(file) :
+            uri.IdnHost.EndsWith(".cloudfront.net", StringComparison.OrdinalIgnoreCase) && uri.AbsolutePath.StartsWith("/wp-cmg/", StringComparison.Ordinal) ? CmgQuality.Match(file) : Match.Empty;
+        return match.Success && int.TryParse(match.Groups["height"].Value, out var height) && height <= 4320 ? height : 0;
+    }
+
+    internal static string ResultKey(Uri uri)
+    {
+        if (SomaMount(uri) is string soma) return soma;
+        if (VideoQuality(uri) > 0)
+            return uri.GetLeftPart(UriPartial.Authority) + uri.AbsolutePath[..(uri.AbsolutePath.LastIndexOf('/') + 1)] + "{video-quality}" +
+                (uri.IdnHost == "streaming.hearstdigitalstudios.com" ? HearstQuality.Match(uri.Segments.Last()).Groups["aspect"].Value : "") + uri.Query;
+        if (uri.IdnHost == "dai.google.com" && DaiSession.Match(uri.AbsolutePath) is { Success: true } match)
+            return uri.GetLeftPart(UriPartial.Authority) + match.Groups[1].Value + "{session}" + match.Groups[2].Value + uri.Query;
+        return uri.AbsoluteUri;
     }
 
     private static string? SomaMount(Uri uri)

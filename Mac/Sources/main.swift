@@ -698,13 +698,15 @@ import UniformTypeIdentifiers
             return
         }
         let workspace = NSWorkspace.shared
-        let associated = (preferences.mediaPlayer == .automatic ? UTType(filenameExtension: "m3u8") : nil)
+        // Video results require a video-capable player; FastPlay is an audio player.
+        let choice: MediaPlayerChoice = selected.format.localizedCaseInsensitiveContains("video") ? .vlc : preferences.mediaPlayer
+        let associated = (choice == .automatic ? UTType(filenameExtension: "m3u8") : nil)
             .flatMap { workspace.urlForApplication(toOpen: $0) }
-        guard let (player, target) = StreamPreview.target(choice: preferences.mediaPlayer, associated: associated,
+        guard let (player, target) = StreamPreview.target(choice: choice, associated: associated,
             associatedIdentifier: associated.flatMap { Bundle(url: $0)?.bundleIdentifier },
             installed: { workspace.urlForApplication(withBundleIdentifier: $0) }) else {
-            let message = preferences.mediaPlayer == .automatic ? "Install VLC or FastPlay." :
-                "\(preferences.mediaPlayer.title) was not found. Choose another media player in Settings."
+            let message = choice == .automatic ? "Install VLC or FastPlay." :
+                "\(choice.title) was not found. Choose another media player in Settings."
             showMessage("Play Stream", message + " Shift+Return saves and opens a playlist in your default player.")
             return
         }

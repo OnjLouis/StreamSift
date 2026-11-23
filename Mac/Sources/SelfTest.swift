@@ -71,9 +71,13 @@ func selfTest() throws {
     let local = Station(name: "Local", url: "http://127.0.0.1/stream", format: "MP3", bitrate: 320, foundOn: stable.foundOn)
     let temporary = Station(name: "Live", url: "https://radio.example/opaque-session/playlist.m3u8", format: "HLS", bitrate: nil,
                             foundOn: stable.foundOn)
+    let videoHls = Station(name: "Video", url: "https://radio.example/opaque-session/video.m3u8", format: "HLS video", bitrate: nil,
+                           foundOn: stable.foundOn)
+    let replayHls = Station(name: "Replay", url: "https://radio.example/opaque-session/replay.m3u8", format: "HLS video replay", bitrate: nil,
+                            foundOn: stable.foundOn)
     let view = ResultView(format: "AAC", order: .listenersDescending)
     guard let saved = LastResults.capture(input: "radio.example:9020", mode: .passive,
-                                         stations: [addressed, local, temporary, stable, safe, safe], view: view,
+                                         stations: [addressed, local, temporary, videoHls, replayHls, stable, safe, safe], view: view,
                                          selection: safe.url) else { throw UpdateFailure.invalid("No restorable streams") }
     try require(saved.stations == [stable, safe], "Only reusable streams are remembered")
     saved.save(to: defaults)

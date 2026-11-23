@@ -31,6 +31,24 @@ Optional automatic fallback runs the selected method first. When no live
 stream is verified, it tries the remaining methods in website, browser, then
 directory order. This is off by default on both platforms.
 
+## Experimental video support
+
+Website and browser-assisted searches can discover public MP4, WebM and HLS
+video, including supported AES-128 HLS streams. A verified HLS video rendition
+is returned as its master playlist, allowing the player to select quality and
+audio. On Windows and Mac, video uses VLC; Windows can also use Winamp for some
+direct videos. VLC must be installed, or on Windows a portable VLC distribution
+may be placed in the app's `VLC` folder. VLC is not included in this repository
+or the standard build.
+
+Video discovery includes adapters for the public NBC10 Boston, CBS Boston,
+Boston 25 and WCVB player pages. WCVB may expose a replay between broadcasts.
+Known duplicate video qualities and HLS renditions are grouped. A normal website
+search can check up to 120 addresses, subject to separate time and result limits.
+DASH, DRM, logins, special playback headers and general HLS video-on-demand
+support are not included. Availability and playback can vary by station and region.
+Mac video playback and WCVB replay playback require further testing.
+
 ## Build and test
 
 The shared discovery engine requires the .NET 10 SDK to build. The Windows

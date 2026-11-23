@@ -31,13 +31,13 @@ internal static partial class Extraction
     [GeneratedRegex("""\b(?:var|let|const)\s+streamSrcDB\s*=\s*['"]([^'"]{1,2048})['"]""", RegexOptions.None, 200)]
     private static partial Regex SecureNetStream();
 
-    private const int MaxPageLinks = 100;
+    private const int MaxPageLinks = 220;
     private static readonly Uri SwedishRadioChannels = new("https://api.sr.se/api/v2/channels?format=json&pagination=false");
     private const string TritonHost = "playerservices.streamtheworld.com";
     private const string TritonProvisioning = "/api/livestream";
     private const string TritonRedirect = "/api/livestream-redirect/";
     private static readonly XNamespace TritonSchema = "http://provisioning.streamtheworld.com/player/livestream-1.9";
-    internal sealed record Extracted(bool LiveHls, bool IsDirectory, List<Link> Links, ServerListing? Server);
+    internal sealed record Extracted(bool LiveHls, bool VideoHls, bool IsDirectory, List<Link> Links, ServerListing? Server);
 
     internal static Uri? OfficialCatalogue(Uri page)
     {
@@ -49,6 +49,12 @@ internal static partial class Extraction
     internal static Link? PublicPlayerSource(Uri page)
     {
         if (TuneIn.Source(page) is Link tuneIn) return tuneIn;
+        // Boston 25's public live page currently loads this provider's HLS master
+        // dynamically. Keep the page as the result source and verify the stream.
+        if (page.IdnHost == "www.boston25news.com" && page.IsDefaultPort &&
+            page.AbsolutePath.TrimEnd('/') == "/video")
+            return new Link(new Uri("https://cdn-uw2-prod.tsv2.amagi.tv/linear/amg00327-coxmediagroup-wfxtnow-ono/playlist.m3u8"),
+                page, LinkKind.Playlist, "Boston 25 Now", VideoHint: true);
         if (page.IdnHost != "radio.garden" || !page.IsDefaultPort) return null;
         string[] path = page.AbsolutePath.Trim('/').Split('/');
         if (path is not ["listen", { Length: > 0 } slug, { Length: 8 } id] ||
@@ -62,7 +68,7 @@ internal static partial class Extraction
         var links = new List<Link>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var trim = text.TrimStart('\uFEFF', ' ', '\r', '\n', '\t');
-        bool hls = false;
+        bool hls = false, videoHls = false;
         bool directory = false;
         ServerListing? server = null;
         try
@@ -97,7 +103,7 @@ internal static partial class Extraction
                 Html(trim);
         }
         catch (Exception e) when (e is RegexMatchTimeoutException or XmlException or JsonException) { }
-        return new(hls, directory, links, server);
+        return new(hls, videoHls, directory, links, server);
 
         void Add(string? value, LinkKind kind, string? name = null, bool hint = false, Uri? relative = null,
             NameOrigin nameOrigin = NameOrigin.Inferred, Uri? wrapper = null, bool keepAddress = false, int? listeners = null)
@@ -113,12 +119,18 @@ internal static partial class Extraction
                 keepAddress, listeners, source.TuneInId));
         }
 
-        void Candidate(string raw, string? name, bool explicitAudio = false, Uri? relative = null)
+        void Candidate(string raw, string? name, bool explicitAudio = false, Uri? relative = null, bool explicitVideo = false, bool videoReplay = false)
         {
             raw = raw.Trim();
             if (!PublicNetwork.TryUrl(WebUtility.HtmlDecode(raw), relative ?? page, out var uri)) return;
             if (Provider(uri) is Uri configured) Add(configured.AbsoluteUri, LinkKind.Audio, name, true);
-            if (Playlist(uri)) Add(raw, LinkKind.Playlist, name, explicitAudio, relative);
+            if (Playlist(uri))
+            {
+                if (explicitVideo && uri != page && seen.Add(uri.AbsoluteUri) && links.Count < MaxPageLinks)
+                    links.Add(new Link(uri, page, LinkKind.Playlist, name, VideoHint: true, VideoReplay: videoReplay));
+                else if (!explicitVideo) Add(raw, LinkKind.Playlist, name, explicitAudio, relative);
+            }
+            else if (explicitVideo || HasExtension(uri, ".mp4", ".webm")) Add(raw, LinkKind.Video, name, relative: relative);
             else if (explicitAudio || LikelyAudio(uri)) Add(raw, LinkKind.Audio, name, explicitAudio, relative);
         }
 
@@ -148,6 +160,25 @@ internal static partial class Extraction
 
         void Html(string body)
         {
+            // WCVB publishes the current live player or latest replay in its page state.
+            // Do not confuse unrelated clips embedded elsewhere on this page with it.
+            if (page.IdnHost == "www.wcvb.com" && page.AbsolutePath.TrimEnd('/') == "/nowcast")
+            {
+                var state = body.Replace("\\\\", "\\").Replace("\\\"", "\"")
+                    .Replace("\\/", "/").Replace("\\u0026", "&", StringComparison.OrdinalIgnoreCase);
+                var match = Regex.Match(state, "\"nowcastData\"\\s*:\\s*(\\{[^{}]{0,8192}\\})", RegexOptions.None, TimeSpan.FromMilliseconds(300));
+                if (match.Success)
+                {
+                    using var stateJson = JsonDocument.Parse(match.Groups[1].Value);
+                    var nowcast = stateJson.RootElement;
+                    if (nowcast.TryGetProperty("stream", out var stream) && stream.ValueKind == JsonValueKind.String &&
+                        nowcast.TryGetProperty("is_live", out var live) && live.ValueKind is JsonValueKind.True or JsonValueKind.False &&
+                        nowcast.TryGetProperty("is_ondemand", out var replay) && replay.ValueKind is JsonValueKind.True or JsonValueKind.False &&
+                        (live.GetBoolean() || replay.GetBoolean()))
+                        Candidate(stream.GetString()!, "NewsCenter 5", explicitVideo: true, videoReplay: replay.GetBoolean());
+                    return;
+                }
+            }
             var document = new HtmlParser().ParseDocument(body);
             var title = Label(document.Title) ?? source.Name;
             int appEntryScripts = 0;
@@ -266,6 +297,25 @@ internal static partial class Extraction
                 return;
             }
 
+            foreach (var element in document.QuerySelectorAll("[data-videos]"))
+            {
+                try
+                {
+                    using var videos = JsonDocument.Parse(element.GetAttribute("data-videos")!);
+                    if (videos.RootElement.ValueKind == JsonValueKind.Array)
+                        foreach (var video in videos.RootElement.EnumerateArray().Take(100))
+                            if (video.ValueKind == JsonValueKind.Object && video.TryGetProperty("video", out var details) &&
+                                details.ValueKind == JsonValueKind.Object && details.TryGetProperty("meta", out var metadata) &&
+                                metadata.ValueKind == JsonValueKind.Object && metadata.TryGetProperty("mpx_is_livestream", out var liveFlag) && liveFlag.ValueKind == JsonValueKind.String && liveFlag.GetString() == "1" &&
+                                metadata.TryGetProperty("m3u8_url", out var videoValue) && videoValue.ValueKind == JsonValueKind.String && videoValue.GetString() is string videoUrl)
+                                Candidate(videoUrl, title, relative: baseUrl, explicitVideo: true);
+                }
+                catch (JsonException) { }
+            }
+
+            foreach (var element in document.QuerySelectorAll("video[src], video source[src]"))
+                Candidate(element.GetAttribute("src")!, title, relative: baseUrl, explicitVideo: true);
+
             foreach (var element in document.QuerySelectorAll("audio[src], audio source[src]"))
                 Candidate(element.GetAttribute("src")!, title, true, baseUrl);
 
@@ -287,7 +337,8 @@ internal static partial class Extraction
                         linkTitle.StartsWith("Direct stream", StringComparison.OrdinalIgnoreCase);
                     if (directLink && linkTitle.Contains("subscription", StringComparison.OrdinalIgnoreCase)) continue;
                     Candidate(raw, label, type.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) ||
-                        property.StartsWith("og:audio", StringComparison.OrdinalIgnoreCase) || publishedStream || directLink, baseUrl);
+                        property.StartsWith("og:audio", StringComparison.OrdinalIgnoreCase) || publishedStream || directLink, baseUrl,
+                        type.StartsWith("video/", StringComparison.OrdinalIgnoreCase) || property.StartsWith("og:video", StringComparison.OrdinalIgnoreCase));
                     if (element.LocalName is "a" or "iframe" && (IsGlobalPlayer(uri) || IsGlobalRadioplayer(uri)))
                         Add(raw, LinkKind.DedicatedPlayer, label, relative: baseUrl);
                     else if (element.LocalName is "a" or "iframe" && (SecureNetCallSign(uri) != null || IsTritonPlayer(uri)))
@@ -441,25 +492,42 @@ internal static partial class Extraction
                 return;
             }
             if (lines.Any(l => (l.StartsWith("#EXT-X-KEY:", StringComparison.Ordinal) ||
-                                l.StartsWith("#EXT-X-SESSION-KEY:", StringComparison.Ordinal)) && Attr(l, "METHOD") != "NONE"))
-                return;
-            bool audioOnlyVariant = false;
+                                l.StartsWith("#EXT-X-SESSION-KEY:", StringComparison.Ordinal)) && Attr(l, "METHOD") != "NONE" &&
+                !(source.VideoHint && Attr(l, "METHOD") == "AES-128" && (Attr(l, "KEYFORMAT") is null or "identity") &&
+                  PublicNetwork.TryUrl(Attr(l, "URI") ?? "", page, out _)))) return;
+            bool audioOnlyVariant = false, videoVariant = false;
+            bool master = lines.Any(l => l.StartsWith("#EXT-X-STREAM-INF:", StringComparison.Ordinal));
+            bool hasVideo = master && (source.VideoHint || (!source.AudioHint && lines.Where(l => l.StartsWith("#EXT-X-STREAM-INF:", StringComparison.Ordinal))
+                .Any(l => (Attr(l, "CODECS")?.Split(',') ?? []).Any(c => !IsAudioCodec(c)))));
             foreach (string line in lines)
             {
                 if (line.StartsWith("#EXT-X-STREAM-INF:", StringComparison.Ordinal))
                 {
                     var codes = Attr(line, "CODECS")?.Split(',') ?? [];
                     audioOnlyVariant = codes.Length > 0 && codes.All(IsAudioCodec);
+                    videoVariant = !audioOnlyVariant && (source.VideoHint || (!source.AudioHint && codes.Any(c => !IsAudioCodec(c))));
                 }
-                else if (line.StartsWith("#EXT-X-MEDIA:", StringComparison.Ordinal) && Attr(line, "TYPE") == "AUDIO")
+                else if (!hasVideo && line.StartsWith("#EXT-X-MEDIA:", StringComparison.Ordinal) && Attr(line, "TYPE") == "AUDIO")
                     Add(Attr(line, "URI"), LinkKind.Playlist, source.Name, true);
-                else if (line.Length != 0 && !line.StartsWith('#') && audioOnlyVariant)
+                else if (line.Length != 0 && !line.StartsWith('#') && videoVariant)
+                {
+                    if (PublicNetwork.TryUrl(line, page, out var variant) && seen.Add(variant.AbsoluteUri) && links.Count < MaxPageLinks)
+                        links.Add(new Link(variant, source.FoundOn, LinkKind.Playlist, source.Name, VideoHint: true, VideoMaster: source.VideoMaster ?? page, VideoReplay: source.VideoReplay));
+                    videoVariant = false;
+                }
+                else if (line.Length != 0 && !line.StartsWith('#') && audioOnlyVariant && !hasVideo)
                 {
                     Add(line, LinkKind.Playlist, source.Name, true);
                     audioOnlyVariant = false;
                 }
             }
             var segments = lines.Where(l => l.Length > 0 && !l.StartsWith('#')).ToArray();
+            videoHls = !master && (source.VideoHint || (!source.AudioHint && segments.Any(l => PublicNetwork.TryUrl(l, page, out var segment) && HasExtension(segment, ".ts", ".m4s", ".mp4")))) &&
+                lines.Any(l => l.StartsWith("#EXT-X-TARGETDURATION:", StringComparison.Ordinal)) &&
+                (source.VideoReplay || (!lines.Contains("#EXT-X-ENDLIST") && !lines.Contains("#EXT-X-PLAYLIST-TYPE:VOD"))) &&
+                segments.Length > 0 && segments.All(l => PublicNetwork.TryUrl(l, page, out _)) &&
+                lines.Where(l => l.StartsWith("#EXT-X-MAP:", StringComparison.Ordinal) || l.StartsWith("#EXT-X-PART:", StringComparison.Ordinal) || l.StartsWith("#EXT-X-PRELOAD-HINT:", StringComparison.Ordinal))
+                    .All(l => PublicNetwork.TryUrl(Attr(l, "URI") ?? "", page, out _));
             hls = lines.Any(l => l.StartsWith("#EXT-X-TARGETDURATION:", StringComparison.Ordinal)) &&
                   !lines.Contains("#EXT-X-ENDLIST") && !lines.Contains("#EXT-X-PLAYLIST-TYPE:VOD") &&
                   !lines.Any(l => l.StartsWith("#EXT-X-STREAM-INF:", StringComparison.Ordinal)) &&
@@ -554,7 +622,7 @@ internal static partial class Extraction
         uri.AbsolutePath.Trim('/').ToLowerInvariant() is
             "listen" or "listen-live" or "how-to-listen" or "ways-to-listen" or "listen-online" or
             "live" or "live-now" or "live-stream" or "livestream" or "livestreams" or "streaming-urls" or
-            "streams" or "player" or "radio-player" or "en-direct" or "direct" or "ao-vivo" or "en-vivo" or "direkt" ||
+            "streams" or "watch" or "watch-live" or "player" or "radio-player" or "en-direct" or "direct" or "ao-vivo" or "en-vivo" or "direkt" ||
         uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries).Contains("how-to-listen", StringComparer.OrdinalIgnoreCase);
 
     private static bool ListenerHelp(Uri uri, string? name) =>

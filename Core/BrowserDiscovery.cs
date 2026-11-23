@@ -171,7 +171,7 @@ public sealed class BrowserDiscovery(HttpClient client)
                         using var response = await client.SendAsync(outgoing, HttpCompletionOption.ResponseHeadersRead, requestTime.Token);
                         var type = response.Content.Headers.ContentType?.MediaType;
                         if (response.IsSuccessStatusCode && type != null &&
-                            (type.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) ||
+                            (type.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) || type.StartsWith("video/", StringComparison.OrdinalIgnoreCase) ||
                              type.Contains("mpegurl", StringComparison.OrdinalIgnoreCase) || type == "application/ogg"))
                         {
                             Remember(address);
@@ -271,7 +271,7 @@ public sealed class BrowserDiscovery(HttpClient client)
     }
 
     private static bool MediaAddress(Uri uri) => Path.GetExtension(uri.AbsolutePath).ToLowerInvariant() is
-        ".m3u8" or ".m3u" or ".pls" or ".xspf" or ".asx" or ".mp3" or ".mp2" or ".aac" or ".aacp" or ".flac" or ".ogg" or ".opus";
+        ".mp4" or ".webm" or ".m3u8" or ".m3u" or ".pls" or ".xspf" or ".asx" or ".mp3" or ".mp2" or ".aac" or ".aacp" or ".flac" or ".ogg" or ".opus";
 
     private static string? BrowserPath()
     {
@@ -342,7 +342,7 @@ public sealed class BrowserDiscovery(HttpClient client)
             [el.getAttribute('aria-label'),el.title,el.textContent].some(text => patterns.test((text || '').trim())));
           if (control) control.click();
           else {
-            const audio = document.querySelector('audio');
+            const audio = document.querySelector('audio, video');
             if (audio) { audio.muted = true; audio.play().catch(() => {}); }
           }
         })()

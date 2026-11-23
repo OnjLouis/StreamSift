@@ -342,7 +342,7 @@ internal sealed class MainForm : Form
                 { 0 => "No live streams verified.", 1 => "1 stream found.", _ => $"{found.Stations.Count} streams found." }) +
                 $" Checked {found.Requests} {(found.Requests == 1 ? "address" : "addresses")}." +
                 (found.Unreachable > 0 ? $" {found.Unreachable} unavailable." : "") +
-                (found.LimitReached ? " Search limit reached." : "") +
+                (found.LimitReached ? " Search limit reached; some results may be missing." : "") +
                 (run.Attempts > 1 ? $" Tried {run.Attempts} methods." : "") +
                 (run.FailedMethods > 0 ? $" Methods that could not finish: {run.FailedMethods}." : "") +
                 (refreshing && resultView.Format != null ? $" Showing {visibleResults.Length} {resultView.Format} streams." : "") +
@@ -734,8 +734,10 @@ internal sealed class MainForm : Form
             return;
         }
         if (Selected is not Station item) return;
-        var choice = preferences.MediaPlayer;
+        var choice = item.IsVideo && (item.IsHls || preferences.MediaPlayer != PlayerChoice.Winamp) ? PlayerChoice.Vlc : preferences.MediaPlayer;
         var player = StreamPreview.FindPlayer(choice);
+        if (item.IsVideo && !item.IsHls && player == null && preferences.MediaPlayer == PlayerChoice.Automatic)
+            player = StreamPreview.FindPlayer(PlayerChoice.Winamp);
         if (player == null)
         {
             ShowText(StreamList.PlayLabel, choice == PlayerChoice.Automatic
@@ -757,7 +759,7 @@ internal sealed class MainForm : Form
                 throw;
             }
             if (playlist != null) handoffs.Start();
-            SetStatus("Sent to " + player.Name + ".");
+            SetStatus("Sent to " + player.Name + (item.IsVideo && player.Kind == PlayerChoice.Winamp ? ". Video format support depends on Winamp and its plugins." : "."));
         });
     }
 
