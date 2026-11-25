@@ -4,14 +4,15 @@ using System.Text;
 
 namespace StreamSift;
 
-internal enum PlayerChoice { Automatic, Vlc, Foobar2000, FastPlay }
+internal enum PlayerChoice { Automatic, Vlc, Foobar2000, FastPlay, Custom }
 
 internal static class StreamPreview
 {
     internal sealed record Player(string Executable, PlayerChoice Kind, bool ShellPlaylist = false)
     {
-        internal string Name => ShellPlaylist ? "your default playlist player" : DisplayName(Kind);
-        internal bool NeedsPlaylist => ShellPlaylist || Kind == PlayerChoice.FastPlay;
+        internal string Name => ShellPlaylist ? "your default playlist player" :
+            Kind == PlayerChoice.Custom ? Path.GetFileNameWithoutExtension(Executable) : DisplayName(Kind);
+        internal bool NeedsPlaylist => ShellPlaylist || Kind is PlayerChoice.FastPlay or PlayerChoice.Custom;
     }
 
     internal static string DisplayName(PlayerChoice choice) => choice switch
@@ -19,11 +20,13 @@ internal static class StreamPreview
         PlayerChoice.Vlc => "VLC",
         PlayerChoice.Foobar2000 => "Foobar2000",
         PlayerChoice.FastPlay => "FastPlay",
+        PlayerChoice.Custom => "Custom",
         _ => "Automatic"
     };
 
-    internal static Player? FindPlayer(PlayerChoice choice)
+    internal static Player? FindPlayer(PlayerChoice choice, string? customPath = null)
     {
+        if (choice == PlayerChoice.Custom) return CustomPlayer(customPath);
         const uint associatedExecutable = 2, ignoreUnknown = 0x400;
         var associated = new StringBuilder(4096);
         uint length = (uint)associated.Capacity;
@@ -33,6 +36,15 @@ internal static class StreamPreview
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86) }.Where(root => root.Length != 0).Distinct();
         return ResolvePlayer(choice, association, roots);
     }
+
+    internal static string? CustomPath(string? path) =>
+        path != null && Path.IsPathFullyQualified(path) && !path.Any(char.IsControl) &&
+        !path.StartsWith(@"\\?\", StringComparison.Ordinal) && !path.StartsWith(@"\\.\", StringComparison.Ordinal) &&
+        Path.GetExtension(path).Equals(".exe", StringComparison.OrdinalIgnoreCase) &&
+        !Path.GetFileName(path).Equals("StreamSift.exe", StringComparison.OrdinalIgnoreCase) ? path : null;
+
+    private static Player? CustomPlayer(string? path) =>
+        CustomPath(path) is string executable && File.Exists(executable) ? new Player(executable, PlayerChoice.Custom) : null;
 
     internal static Player? ResolvePlayer(PlayerChoice choice, string? association, IEnumerable<string> roots)
     {
@@ -55,7 +67,7 @@ internal static class StreamPreview
                 if (Supported(path) is Player installed) return installed;
             }
         }
-        return preferred;
+        return null;
     }
 
     private static Player? Supported(string path)
@@ -74,7 +86,7 @@ internal static class StreamPreview
     {
         if (!PublicNetwork.TryUrl(station.Url.AbsoluteUri, null, out var address))
             throw new InvalidDataException("The stream does not have a public HTTP or HTTPS address.");
-        if (player.NeedsPlaylist)
+        if (player.NeedsPlaylist || preparedPlaylist != null)
         {
             if (preparedPlaylist == null || !Path.IsPathFullyQualified(preparedPlaylist) ||
                 !Path.GetExtension(preparedPlaylist).Equals(".m3u8", StringComparison.OrdinalIgnoreCase))
@@ -82,8 +94,11 @@ internal static class StreamPreview
             if (player.ShellPlaylist) return new ProcessStartInfo(preparedPlaylist) { UseShellExecute = true };
         }
         var start = new ProcessStartInfo(player.Executable) { UseShellExecute = false };
-        if (player.Kind == PlayerChoice.Foobar2000) start.ArgumentList.Add("/immediate");
-        start.ArgumentList.Add(player.NeedsPlaylist ? preparedPlaylist! : address.AbsoluteUri);
+        if (player.Kind == PlayerChoice.Custom) start.WorkingDirectory = Path.GetDirectoryName(player.Executable)!;
+        if (player.Kind == PlayerChoice.Foobar2000 ||
+            player.Kind == PlayerChoice.Custom && Supported(player.Executable)?.Kind == PlayerChoice.Foobar2000)
+            start.ArgumentList.Add("/immediate");
+        start.ArgumentList.Add(preparedPlaylist ?? address.AbsoluteUri);
         return start;
     }
 

@@ -13,15 +13,19 @@ enum ContextGuide {
     Space or Escape: Close the review.
     """
 
-    static func streams(selected: Int) -> String {
+    static func streams(selected: Int, tracks: Bool = false, fileColumns: Bool = false) -> String {
         var lines = [
-            selected > 1 ? "Multiple streams are selected. Select just one to play it or open its address in a browser."
-                : "Move through the results with Up and Down. Each row shows the station and any available format, bitrate and listener count.",
+            tracks ? "Use Up and Down to move through the tracks. Command+A selects all visible tracks."
+                : (selected > 1 ? "Multiple streams are selected. Select just one to play it or open its address in a browser."
+                    : "Move through the results with Up and Down. Each row shows the name, format and other available information."),
             ""
         ]
-        if selected == 1 { lines += ["Return: Play the stream.", "Option+Return: Open its address in the browser."] }
-        lines += ["F4: Review the full current line.", "Command+C: Copy the selected stream addresses.",
-                  "Shift+Return: Save the selection as a playlist and open it.", "Command+3: Go to Stream Details.", "",
+        if fileColumns { lines.append("The columns show name, format, size and date modified. F4 reads the full current row.") }
+        if tracks { lines.append("Return: Play the selected tracks.") }
+        else if selected == 1 { lines.append("Return: Play the selected result.") }
+        if selected == 1 { lines.append("Option+Return: Open its address in the browser.") }
+        lines += ["F4: Review the full current line.", "Command+C: Copy the selected addresses.",
+                  "Shift+Return: Save the selection as a playlist and open it.", "Command+3: Go to Details.", "",
                   "Command+F: Find in results.", "Command+L: Filter and sort.", "Command+R: Refresh results."]
         return lines.joined(separator: "\n")
     }
@@ -29,25 +33,29 @@ enum ContextGuide {
     static func detail(_ row: DetailRow, canSearch: Bool) -> String {
         let description: String
         switch row.kind {
-        case .streamAddress: description = "This is the address of the verified stream."
+        case .streamAddress: description = "This is the address of the selected result."
         case .foundOn:
-            description = row.foundOnIsStream ? "The stream was found at its own address, not on a separate page."
-                : "This is the page or listing where the stream was found."
-        case .station: description = "This is the station name shown in the results."
+            description = row.foundOnIsStream ? "The result was found at its own address."
+                : "This is the page or listing where the result was found."
+        case .station:
+            description = row.label == "Track" ? "This is the track name shown in the results."
+                : "This is the station name shown in the results."
         case .format: description = "This is the reported audio format. HLS is a live playlist format."
         case .bitrate: description = "This is the reported bitrate in kilobits per second. Not all streams report it."
         case .listeners:
             description = "This is the listener count reported when the stream was checked. Command+R refreshes it if the server reports a new count."
+        case .dateModified: description = "This is the date and time given by the directory."
+        case .fileSize: description = "This is the file size given by the directory. The site may round the value."
         case .selection:
-            description = "Stream Details shows the first selected stream. Playlist and copy commands in Streams still use the full selection."
+            description = "Details shows the first selected result. Playlist and copy commands in Results use the full selection."
         }
         var lines = [description, ""]
         if canSearch {
             switch row.enterCommand {
-            case .savePlaylist: lines.append("Return: Open Save Stream Playlist for this one HLS stream.")
+            case .savePlaylist: lines.append("Return: Open Save Playlist for this HLS stream.")
             case .scanServer: lines.append("Return: Scan the server root instead of searching this same stream again.")
             case .search:
-                lines.append(row.kind == .foundOn ? "Return: Search the source page." : "Return: Search this exact stream address.")
+                lines.append(row.kind == .foundOn ? "Return: Search the source page." : "Return: Search this exact address.")
             default: break
             }
             if row.kind == .streamAddress, row.server != nil {

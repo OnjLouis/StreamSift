@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import UniformTypeIdentifiers
 
 let functionOne = String(UnicodeScalar(NSF1FunctionKey)!)
 let functionFour = String(UnicodeScalar(NSF4FunctionKey)!)
@@ -86,6 +87,43 @@ final class SettingsTabs: NSTabView {
     }
 }
 
+enum FileResultColumn: String, CaseIterable {
+    case name = "Stream", format, size, dateModified
+
+    var title: String {
+        switch self {
+        case .name: return "Name"
+        case .format: return "Format"
+        case .size: return "Size"
+        case .dateModified: return "Date modified"
+        }
+    }
+
+    var width: CGFloat {
+        switch self {
+        case .name: return 630
+        case .format: return 86
+        case .size: return 94
+        case .dateModified: return 183
+        }
+    }
+
+    func value(for station: Station, named name: String) -> String {
+        switch self {
+        case .name: return name
+        case .format: return station.format
+        case .size: return station.fileSizeLabel ?? "Not listed"
+        case .dateModified: return station.dateModifiedLabel ?? "Not listed"
+        }
+    }
+
+    static func reviewLine(for station: Station, named name: String) -> String {
+        let size = Self.size.value(for: station, named: name)
+        let modified = Self.dateModified.value(for: station, named: name)
+        return "\(name), \(station.format), Size \(size), Date modified \(modified)"
+    }
+}
+
 final class StreamTable: NSTableView {
     var copyAddress: (() -> Void)?
     var openPlayer: (() -> Void)?
@@ -95,6 +133,29 @@ final class StreamTable: NSTableView {
     var actionMenu: (() -> NSMenu?)?
     var didSelectAll: (() -> Void)?
     var hasStreams = false
+    private(set) var showsFileColumns = false
+
+    func setFileColumns(_ show: Bool) {
+        guard show != showsFileColumns, let name = tableColumns.first else { return }
+        showsFileColumns = show
+        name.title = show ? FileResultColumn.name.title : "Stream"
+        if show {
+            for field in FileResultColumn.allCases where field != .name {
+                let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(field.rawValue))
+                column.title = field.title
+                column.width = field.width
+                column.resizingMask = .userResizingMask
+                addTableColumn(column)
+            }
+        } else {
+            for column in tableColumns.dropFirst() { removeTableColumn(column) }
+        }
+        if let scroll = enclosingScrollView {
+            scroll.hasHorizontalScroller = show
+            let metadataWidth = tableColumns.dropFirst().reduce(CGFloat.zero) { $0 + $1.width }
+            name.width = max(name.minWidth, scroll.contentSize.width - metadataWidth - intercellSpacing.width * CGFloat(numberOfColumns))
+        }
+    }
 
     override var acceptsFirstResponder: Bool { hasStreams && super.acceptsFirstResponder }
 
@@ -205,6 +266,8 @@ final class StreamTable: NSTableView {
     private let sounds = NSButton(checkboxWithTitle: "Search sounds", target: nil, action: nil)
     private let fallback = NSButton(checkboxWithTitle: "Automatically try other search methods", target: nil, action: nil)
     private let mediaPlayer = NSPopUpButton()
+    private let choosePlayer = NSButton(title: "Choose Player...", target: nil, action: nil)
+    private var customPlayerPath: String?
     private let updates = NSButton(checkboxWithTitle: "Check for updates at startup", target: nil, action: nil)
     private let folder = NSTextField()
     private let apply: (Preferences) -> Void
@@ -212,7 +275,7 @@ final class StreamTable: NSTableView {
     private let soundsHint = "Play sounds when a search starts, succeeds or fails."
     private let fallbackHint = "If the chosen method finds no playable stream or cannot finish, try the other methods. This can start a temporary browser and check the public directory. Escape cancels the whole search."
     private let folderHint = "Choose where Shift+Return saves playlists. Command+S starts its Save dialog in the same folder."
-    private let playerHint = "Choose what plays a stream when you press Return. Automatic uses your default playlist app when available. Shift+Return also saves a playlist before opening it."
+    private let playerHint = "Choose what plays a result when you press Return. Automatic uses your default playlist app when available. Use Choose Player to find an application manually."
     private let updateHint = "Check for a newer signed release when StreamSift opens. Updates are installed only after you choose Install Update."
 
     init(current: Preferences, manual: @escaping () -> Void, apply: @escaping (Preferences) -> Void) {
@@ -227,8 +290,10 @@ final class StreamTable: NSTableView {
         window.help = { [weak self] in self?.showHelp() }
         sounds.state = current.sounds ? .on : .off
         fallback.state = current.automaticFallback ? .on : .off
-        mediaPlayer.addItems(withTitles: MediaPlayerChoice.allCases.map(\.title))
-        mediaPlayer.selectItem(at: MediaPlayerChoice.allCases.firstIndex(of: current.mediaPlayer) ?? 0)
+        customPlayerPath = current.customPlayerPath
+        let choices = MediaPlayerChoice.choices(customPath: customPlayerPath)
+        mediaPlayer.addItems(withTitles: choices.map(playerLabel))
+        mediaPlayer.selectItem(at: choices.firstIndex(of: current.mediaPlayer) ?? 0)
         updates.state = current.startupUpdates ? .on : .off
         folder.stringValue = current.folder.path
         folder.isBezeled = true
@@ -239,9 +304,12 @@ final class StreamTable: NSTableView {
         label("Check for updates at startup", for: updates, hint: updateHint)
         label("Playlist folder", for: folder, hint: folderHint)
         label("Media player", for: mediaPlayer, hint: playerHint)
+        choosePlayer.target = self
+        choosePlayer.action = #selector(browsePlayer)
+        label("Choose Player", for: choosePlayer, hint: "Select an application that can open an M3U8 playlist. This choice is used only by StreamSift.")
         let playerLabel = NSTextField(labelWithString: "Media player:")
         playerLabel.setAccessibilityServesAsTitleForUIElements([mediaPlayer])
-        let playerRow = NSStackView(views: [playerLabel, mediaPlayer])
+        let playerRow = NSStackView(views: [playerLabel, mediaPlayer, choosePlayer])
         playerRow.alignment = .centerY
         let browse = NSButton(title: "Browse...", target: self, action: #selector(browseFolder))
         let reset = NSButton(title: "Use Default Folder", target: self, action: #selector(defaultFolder))
@@ -278,7 +346,7 @@ final class StreamTable: NSTableView {
         window.keyOrder = { [weak self, weak browse, weak reset, weak ok, weak cancel] in
             guard let self, let ok, let cancel else { return [] }
             let controls: [NSView?] = tabs.selectedTabViewItem?.identifier as? String == "Updates" ?
-                [tabs, updates, cancel, ok] : [tabs, sounds, fallback, mediaPlayer, folder, browse, reset, cancel, ok]
+                [tabs, updates, cancel, ok] : [tabs, sounds, fallback, mediaPlayer, choosePlayer, folder, browse, reset, cancel, ok]
             return controls.compactMap { $0 }
         }
         window.initialFirstResponder = tabs
@@ -286,6 +354,36 @@ final class StreamTable: NSTableView {
     }
 
     @objc private func dismiss() { window.performClose(nil) }
+    private func playerLabel(_ choice: MediaPlayerChoice) -> String {
+        guard choice == .custom, let customPlayerPath else { return choice.title }
+        return "Custom (\(choice.displayName(customPath: customPlayerPath)))"
+    }
+
+    @objc private func browsePlayer() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Player"
+        panel.prompt = "Choose"
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.directoryURL = customPlayerPath.map { URL(fileURLWithPath: $0).deletingLastPathComponent() }
+            ?? URL(fileURLWithPath: "/Applications", isDirectory: true)
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK else { return }
+            guard let app = StreamPreview.customApplication(panel.url?.path) else {
+                HelpPanel(title: "Choose Player", text: "Choose a media player application.", manual: manual).present(on: window)
+                return
+            }
+            customPlayerPath = app.path
+            let choices = MediaPlayerChoice.choices(customPath: customPlayerPath)
+            let index = choices.firstIndex(of: .custom)!
+            let title = playerLabel(.custom)
+            if let item = mediaPlayer.item(at: index) { item.title = title }
+            else { mediaPlayer.addItem(withTitle: title) }
+            mediaPlayer.selectItem(at: index)
+            window.makeFirstResponder(mediaPlayer)
+        }
+    }
+
     @objc private func browseFolder() {
         let panel = NSOpenPanel()
         panel.title = "Choose Playlist Folder"
@@ -301,6 +399,9 @@ final class StreamTable: NSTableView {
     @objc private func defaultFolder() { folder.stringValue = Preferences.defaultFolder.path }
 
     @objc private func accept() {
+        let choices = MediaPlayerChoice.choices(customPath: customPlayerPath)
+        let selected = choices.indices.contains(mediaPlayer.indexOfSelectedItem)
+            ? choices[mediaPlayer.indexOfSelectedItem] : .automatic
         let path = folder.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalized = Preferences.validFolder(path)
         guard path.isEmpty || normalized != nil || URL(fileURLWithPath: path).standardizedFileURL.path == Preferences.defaultFolder.path else {
@@ -312,8 +413,8 @@ final class StreamTable: NSTableView {
         chosen.automaticFallback = fallback.state == .on
         chosen.startupUpdates = updates.state == .on
         chosen.customFolder = normalized
-        chosen.mediaPlayer = MediaPlayerChoice.allCases.indices.contains(mediaPlayer.indexOfSelectedItem)
-            ? MediaPlayerChoice.allCases[mediaPlayer.indexOfSelectedItem] : .automatic
+        chosen.mediaPlayer = selected
+        chosen.customPlayerPath = customPlayerPath
         apply(chosen)
         dismiss()
     }

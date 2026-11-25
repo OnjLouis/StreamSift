@@ -3,16 +3,21 @@ import Foundation
 enum ResultOrder: Int, CaseIterable {
     case search, nameAscending, nameDescending, bitrateDescending, bitrateAscending
     case listenersDescending, listenersAscending
+    case dateModifiedDescending, dateModifiedAscending, fileSizeDescending, fileSizeAscending
 
-    var label: String {
+    func label(tracks: Bool) -> String {
         switch self {
-        case .search: return "Search order"
-        case .nameAscending: return "Station name, A to Z"
-        case .nameDescending: return "Station name, Z to A"
+        case .search: return tracks ? "Listed order" : "Search order"
+        case .nameAscending: return tracks ? "Track name, A to Z" : "Station name, A to Z"
+        case .nameDescending: return tracks ? "Track name, Z to A" : "Station name, Z to A"
         case .bitrateDescending: return "Bitrate, highest first"
         case .bitrateAscending: return "Bitrate, lowest first"
         case .listenersDescending: return "Listeners, most first"
         case .listenersAscending: return "Listeners, fewest first"
+        case .dateModifiedDescending: return "Date modified, newest first"
+        case .dateModifiedAscending: return "Date modified, oldest first"
+        case .fileSizeDescending: return "File size, largest first"
+        case .fileSizeAscending: return "File size, smallest first"
         }
     }
 }
@@ -21,19 +26,35 @@ struct ResultView {
     var format: String?
     var order = ResultOrder.search
 
+    static func forSearch(fileIndex: Bool) -> ResultView {
+        ResultView(order: fileIndex ? .nameAscending : .search)
+    }
+
     static func formats(_ stations: [Station]) -> [String] {
         var seen = Set<String>()
         return stations.map(\.format).filter { seen.insert($0.uppercased()).inserted }
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
-    func retainingAvailable(in stations: [Station]) -> ResultView {
+    static func availableOrders(_ stations: [Station]) -> [ResultOrder] {
+        var orders: [ResultOrder] = [.search, .nameAscending, .nameDescending]
+        if stations.contains(where: { $0.isTrack == true }) {
+            if stations.contains(where: { $0.dateModified != nil }) { orders += [.dateModifiedDescending, .dateModifiedAscending] }
+            if stations.contains(where: { $0.fileSizeBytes != nil }) { orders += [.fileSizeDescending, .fileSizeAscending] }
+        } else {
+            orders += [.bitrateDescending, .bitrateAscending]
+            if stations.contains(where: { $0.listeners != nil }) { orders += [.listenersDescending, .listenersAscending] }
+        }
+        return orders
+    }
+
+    func retainingAvailable(in stations: [Station], fileIndex: Bool = false) -> ResultView {
         var next = self
         if let format, !stations.contains(where: { $0.format.caseInsensitiveCompare(format) == .orderedSame }) {
             next.format = nil
         }
-        if (order == .listenersAscending || order == .listenersDescending) && !stations.contains(where: { $0.listeners != nil }) {
-            next.order = .search
+        if !Self.availableOrders(stations).contains(order) {
+            next.order = Self.forSearch(fileIndex: fileIndex).order
         }
         return next
     }
@@ -43,16 +64,28 @@ struct ResultView {
         switch order {
         case .search: return visible
         case .nameAscending, .nameDescending:
+            let tracks = stations.contains { $0.isTrack == true }
+            let direction: ComparisonResult = order == .nameAscending ? .orderedAscending : .orderedDescending
             return visible.sorted { left, right in
-                left.name.localizedCaseInsensitiveCompare(right.name) ==
-                    (order == .nameAscending ? .orderedAscending : .orderedDescending)
+                if tracks {
+                    return left.name.compare(right.name, options: [.caseInsensitive, .numeric], locale: .current) == direction
+                }
+                return left.name.localizedCaseInsensitiveCompare(right.name) == direction
             }
-        case .bitrateDescending, .bitrateAscending, .listenersDescending, .listenersAscending:
-            let listeners = order == .listenersDescending || order == .listenersAscending
-            let descending = order == .bitrateDescending || order == .listenersDescending
+        case .bitrateDescending, .bitrateAscending:
+            return sorted(by: \.bitrate, descending: order == .bitrateDescending)
+        case .listenersDescending, .listenersAscending:
+            return sorted(by: \.listeners, descending: order == .listenersDescending)
+        case .dateModifiedDescending, .dateModifiedAscending:
+            return sorted(by: \.dateModified, descending: order == .dateModifiedDescending)
+        case .fileSizeDescending, .fileSizeAscending:
+            return sorted(by: \.fileSizeBytes, descending: order == .fileSizeDescending)
+        }
+
+        func sorted<Value: Comparable>(by key: KeyPath<Station, Value?>, descending: Bool) -> [Station] {
             return visible.sorted { left, right in
-                guard let a = listeners ? left.listeners : left.bitrate else { return false }
-                guard let b = listeners ? right.listeners : right.bitrate else { return true }
+                guard let a = left[keyPath: key] else { return false }
+                guard let b = right[keyPath: key] else { return true }
                 return descending ? a > b : a < b
             }
         }

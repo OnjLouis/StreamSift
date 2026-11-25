@@ -7,8 +7,8 @@ enum PlaybackHandoff {
         FileManager.default.temporaryDirectory.appendingPathComponent("StreamSift-FastPlay", isDirectory: true)
     }
 
-    static func stage(_ station: Station, in folder: URL = directory) throws -> URL {
-        let data = try Playlist.data([station])
+    static func stage(_ stations: [Station], in folder: URL = directory) throws -> URL {
+        let data = try Playlist.data(stations)
         let io = FileManager.default
         if !io.fileExists(atPath: folder.path) {
             try io.createDirectory(at: folder, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])

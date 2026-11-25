@@ -78,14 +78,16 @@ catch (Exception error) when (method == SearchMethod.Directory && (error is IOEx
 }
 var found = run.Result;
 var output = new Reply(found.Stations.Select(s => new ResultRow(s.Name, s.Url.AbsoluteUri, s.Format, s.Bitrate,
-    s.FoundOn.AbsoluteUri, s.Listeners, s.IsVideo)).ToArray(), found.Requests, found.Unreachable, found.LimitReached,
-    Argument(run.Method), run.Attempts, run.FailedMethods, found.EntryWasWebsite);
+    s.FoundOn.AbsoluteUri, s.Listeners, s.IsVideo, s.IsTrack, s.DateModified, s.DateModifiedLabel,
+    s.FileSizeBytes, s.FileSizeLabel)).ToArray(), found.Requests, found.Unreachable, found.LimitReached,
+    Argument(run.Method), run.Attempts, run.FailedMethods, found.EntryWasWebsite, found.EntryWasFileIndex);
 await JsonSerializer.SerializeAsync(Console.OpenStandardOutput(), output, ScannerJson.Default.Reply);
 return 0;
 
-internal sealed record ResultRow(string Name, string Url, string Format, int? Bitrate, string FoundOn, int? Listeners, bool IsVideo);
+internal sealed record ResultRow(string Name, string Url, string Format, int? Bitrate, string FoundOn, int? Listeners,
+    bool IsVideo, bool IsTrack, DateTime? DateModified, string? DateModifiedLabel, long? FileSizeBytes, string? FileSizeLabel);
 internal sealed record Reply(ResultRow[] Stations, int Requests, int Unreachable, bool LimitReached, string Method, int Attempts, int FailedMethods,
-    bool EntryWasWebsite);
+    bool EntryWasWebsite, bool EntryWasFileIndex);
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(Reply))]

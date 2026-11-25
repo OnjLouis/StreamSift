@@ -1,38 +1,66 @@
 import Foundation
 
 enum MediaPlayerChoice: String, CaseIterable {
-    case automatic, vlc, fastPlay
+    case automatic, vlc, fastPlay, custom
     var title: String {
         switch self {
         case .automatic: return "Automatic"
         case .vlc: return "VLC"
         case .fastPlay: return "FastPlay"
+        case .custom: return "Custom"
         }
     }
 
     var bundleIdentifier: String? {
         switch self {
-        case .automatic: return nil
+        case .automatic, .custom: return nil
         case .vlc: return "org.videolan.vlc"
         case .fastPlay: return "com.fastplay.macos"
         }
     }
+
+    func displayName(customPath: String?) -> String {
+        guard self == .custom, let customPath else { return title }
+        return URL(fileURLWithPath: customPath).deletingPathExtension().lastPathComponent
+    }
+
+    static func choices(customPath: String?) -> [Self] {
+        allCases.filter { $0 != .custom || customPath != nil }
+    }
 }
 
 enum StreamPreview {
-    static func target(choice: MediaPlayerChoice, associated: URL?, associatedIdentifier: String?,
+    static func target(choice: MediaPlayerChoice, customPath: String? = nil, associated: URL?, associatedIdentifier: String?,
                        installed: (String) -> URL?) -> (player: MediaPlayerChoice?, app: URL, needsPlaylist: Bool)? {
+        if choice == .custom {
+            guard let app = customApplication(customPath) else { return nil }
+            return (.custom, app, true)
+        }
         let supported = [MediaPlayerChoice.vlc, .fastPlay]
-        var fallback: (player: MediaPlayerChoice?, app: URL, needsPlaylist: Bool)?
         if let associated, associated.isFileURL, associated.pathExtension == "app", associatedIdentifier != "me.onj.streamsift" {
             let preferred = supported.first { $0.bundleIdentifier == associatedIdentifier }
-            fallback = (preferred, associated, preferred != .vlc)
-            if choice == .automatic || choice == preferred { return fallback }
+            if choice == .automatic || choice == preferred { return (preferred, associated, preferred != .vlc) }
         }
         for player in (choice == .automatic ? supported : [choice]) {
             if let id = player.bundleIdentifier, let path = installed(id) { return (player, path, player == .fastPlay) }
         }
-        return fallback
+        return nil
+    }
+
+    static func customApplication(_ path: String?) -> URL? {
+        guard let path = customPlayerPath(path) else { return nil }
+        let app = URL(fileURLWithPath: path, isDirectory: true)
+        guard let bundle = Bundle(url: app), let identifier = bundle.bundleIdentifier,
+              identifier != "me.onj.streamsift", let executable = bundle.executableURL,
+              FileManager.default.isExecutableFile(atPath: executable.path) else { return nil }
+        return app
+    }
+
+    static func customPlayerPath(_ path: String?) -> String? {
+        guard let path, path.hasPrefix("/"),
+              !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
+        let app = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        return app.pathExtension.lowercased() == "app" ? app.path : nil
     }
 
     static func address(_ station: Station) -> URL? { address(station.url) }
@@ -52,15 +80,21 @@ struct Station: Codable, Equatable {
     let foundOn: String
     var listeners: Int?
     var isVideo: Bool?
+    var isTrack: Bool?
+    var dateModified: String?
+    var dateModifiedLabel: String?
+    var fileSizeBytes: Int64?
+    var fileSizeLabel: String?
 
     func listLabel(named displayName: String) -> String {
-        [displayName, format, bitrate.map { "\($0) kbps" }, listeners.map(ResultView.listenerLabel)]
+        [displayName, isTrack == true ? "Track" : nil, format, bitrate.map { "\($0) kbps" }, listeners.map(ResultView.listenerLabel)]
             .compactMap { $0 }.joined(separator: ", ")
     }
 }
 
 struct SearchResult: Decodable {
     let entryWasWebsite: Bool?
+    let entryWasFileIndex: Bool?
     let stations: [Station]
     let requests: Int
     let unreachable: Int
@@ -71,7 +105,17 @@ struct SearchResult: Decodable {
 
     var summary: String {
         let count = stations.count
-        let caption = count == 0 ? "No live streams verified." : (count == 1 ? "1 stream found." : "\(count) streams found.")
+        let caption: String
+        switch count {
+        case 0 where entryWasFileIndex == true: caption = "No supported audio files listed."
+        case 0: caption = "No playable streams or files found."
+        case 1 where entryWasFileIndex == true: caption = "1 track listed."
+        case 1 where stations[0].isVideo == true: caption = "1 video found."
+        case 1: caption = stations[0].isTrack == true ? "1 track found." : "1 stream found."
+        case _ where entryWasFileIndex == true: caption = "\(count) tracks listed."
+        case _ where stations.contains(where: { $0.isVideo == true }): caption = "\(count) results found."
+        default: caption = "\(count) streams found."
+        }
         return caption + " Checked \(requests) \(requests == 1 ? "address" : "addresses")." +
             (unreachable > 0 ? " \(unreachable) unavailable." : "") + (limitReached ? " Search limit reached." : "") +
             ((attempts ?? 0) > 1 ? " Tried \(attempts ?? 0) methods." : "") +
@@ -99,10 +143,10 @@ enum StreamError: LocalizedError {
         switch self {
         case .invalidAddress: return "Enter a public HTTP or HTTPS address, station name or call sign."
         case .browserAddress: return "Enter a public HTTP or HTTPS address."
-        case .search: return "Search could not finish. Try the station's player page."
+        case .search: return "Search could not finish. Check the address or try again."
         case .browserRequired: return "Find with Browser requires Chrome or Microsoft Edge."
         case .browserSearch: return "Browser-assisted search could not finish."
-        case .directorySearch: return "Public directory lookup could not finish."
+        case .directorySearch: return "Radio directory lookup could not finish."
         case .playlist: return "The stream does not have a public HTTP or HTTPS address."
         case .tooManyNames: return "There are too many playlists with that name in the selected folder."
         case .tooManyHandoffs: return "Too many playlists were sent recently. Try again in two minutes."
@@ -115,7 +159,7 @@ enum SearchMode: String, Codable {
 
     var starting: String {
         switch self {
-        case .passive: return "Finding streams..."
+        case .passive: return "Checking the address..."
         case .browser: return "Searching with a temporary browser..."
         case .directory: return "Checking public radio directories..."
         }
@@ -133,7 +177,7 @@ enum SearchMode: String, Codable {
         switch self {
         case .passive: return ""
         case .browser: return "Browser-assisted search: "
-        case .directory: return "Public directory: "
+        case .directory: return "Radio directory: "
         }
     }
 }
@@ -268,6 +312,7 @@ struct Preferences: Equatable {
     var startupUpdates = true
     var automaticFallback = false
     var mediaPlayer = MediaPlayerChoice.automatic
+    var customPlayerPath: String?
     var customFolder: String?
 
     static var defaultFolder: URL {
@@ -287,6 +332,7 @@ struct Preferences: Equatable {
         startupUpdates = (defaults.object(forKey: "CheckUpdatesAtStartup") as? Bool) ?? true
         automaticFallback = defaults.bool(forKey: "AutomaticFallback")
         mediaPlayer = MediaPlayerChoice(rawValue: defaults.string(forKey: "MediaPlayer") ?? "") ?? .automatic
+        customPlayerPath = StreamPreview.customPlayerPath(defaults.string(forKey: "CustomPlayerPath"))
         customFolder = Self.validFolder(defaults.string(forKey: "PlaylistFolder") ?? "")
     }
 
@@ -295,6 +341,7 @@ struct Preferences: Equatable {
         defaults.set(startupUpdates, forKey: "CheckUpdatesAtStartup")
         defaults.set(automaticFallback, forKey: "AutomaticFallback")
         defaults.set(mediaPlayer.rawValue, forKey: "MediaPlayer")
+        defaults.set(customPlayerPath, forKey: "CustomPlayerPath")
         defaults.set(customFolder, forKey: "PlaylistFolder")
     }
 

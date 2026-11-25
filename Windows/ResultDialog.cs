@@ -44,21 +44,32 @@ internal sealed class ResultDialog : Form
 
     private static readonly string[] OrderNames =
         ["Search order", "Station name, A to Z", "Station name, Z to A", "Bitrate, highest first", "Bitrate, lowest first",
-         "Listeners, most first", "Listeners, fewest first"];
+         "Listeners, most first", "Listeners, fewest first", "Date modified, newest first", "Date modified, oldest first",
+         "File size, largest first", "File size, smallest first"];
 
-    internal static ResultDialog Filter(string[] formats, bool hasListeners, ResultView current, Action openManual, out Func<ResultView> read)
+    internal static ResultDialog Filter(IReadOnlyList<Station> stations, ResultView current, Action openManual, out Func<ResultView> read)
     {
+        var formats = ResultView.Formats(stations);
+        var orders = ResultView.AvailableOrders(stations);
+        bool tracks = stations.Any(s => s.IsTrack);
         var format = new ComboBox { AccessibleName = "Format", DropDownStyle = ComboBoxStyle.DropDownList };
         var sort = new ComboBox { AccessibleName = "Sort by", DropDownStyle = ComboBoxStyle.DropDownList };
         format.Items.Add("All formats");
         format.Items.AddRange(formats);
-        sort.Items.AddRange(hasListeners ? OrderNames : OrderNames[..(int)ResultOrder.ListenersDescending]);
+        sort.Items.AddRange(orders.Select(order => tracks ? order switch
+        {
+            ResultOrder.Search => "Listed order",
+            ResultOrder.NameAscending => "Track name, A to Z",
+            ResultOrder.NameDescending => "Track name, Z to A",
+            _ => OrderNames[(int)order]
+        } : OrderNames[(int)order]).ToArray());
         format.SelectedIndex = Array.IndexOf(formats, current.Format) + 1;
-        sort.SelectedIndex = (int)current.Order;
-        read = () => new(format.SelectedIndex > 0 ? formats[format.SelectedIndex - 1] : null, (ResultOrder)sort.SelectedIndex);
+        sort.SelectedIndex = Math.Max(0, Array.IndexOf(orders, current.Order));
+        read = () => new(format.SelectedIndex > 0 ? formats[format.SelectedIndex - 1] : null, orders[sort.SelectedIndex]);
         return new ResultDialog("Filter and sort", "&Apply", openManual,
             ("&Format:", format, "Show all formats or a format found in the current search."),
-            ("&Sort by:", sort, "Choose search order, station name, bitrate or listeners where reported. Unknown counts and bitrates appear last."));
+            ("&Sort by:", sort, tracks ? "Choose listed order, track name, date modified or file size where listed. Missing values appear last."
+                : "Choose search order, station name, bitrate or listeners where reported. Unknown counts and bitrates appear last."));
     }
 
     internal static ResultDialog Find(string current, Action openManual, out Func<string> read)
@@ -66,7 +77,7 @@ internal sealed class ResultDialog : Form
         var input = new TextBox { AccessibleName = "Find what", Text = current, MaxLength = 256 };
         read = () => input.Text.Trim();
         var dialog = new ResultDialog("Find in results", "&Find", openManual,
-            ("Find &what:", input, "Find text in the visible streams by name, format, bitrate, listeners or address."));
+            ("Find &what:", input, "Find visible results by name, format, address, bitrate or listener count where available."));
         void Update() => dialog.primary.Enabled = !string.IsNullOrWhiteSpace(input.Text);
         input.TextChanged += (_, _) => Update();
         dialog.Shown += (_, _) => input.SelectAll();

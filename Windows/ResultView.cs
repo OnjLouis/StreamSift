@@ -2,22 +2,45 @@ using System.Globalization;
 
 namespace StreamSift;
 
-internal enum ResultOrder { Search, NameAscending, NameDescending, BitrateDescending, BitrateAscending, ListenersDescending, ListenersAscending }
+internal enum ResultOrder
+{
+    Search, NameAscending, NameDescending, BitrateDescending, BitrateAscending, ListenersDescending, ListenersAscending,
+    DateModifiedDescending, DateModifiedAscending, FileSizeDescending, FileSizeAscending
+}
 
 internal readonly record struct ResultView(string? Format = null, ResultOrder Order = ResultOrder.Search)
 {
     private static readonly StringComparer Names = StringComparer.InvariantCultureIgnoreCase;
+    private static readonly StringComparer FileNames = StringComparer.Create(CultureInfo.CurrentCulture,
+        CompareOptions.IgnoreCase | CompareOptions.NumericOrdering);
+
+    internal static ResultView ForSearch(bool fileIndex) => new(Order: fileIndex ? ResultOrder.NameAscending : ResultOrder.Search);
 
     internal static string[] Formats(IReadOnlyList<Station> stations) =>
         stations.Select(s => s.Format).Distinct(Names).OrderBy(format => format, Names).ToArray();
 
-    internal ResultView RetainAvailable(IReadOnlyList<Station> stations)
+    internal static ResultOrder[] AvailableOrders(IReadOnlyList<Station> stations)
+    {
+        var orders = new List<ResultOrder> { ResultOrder.Search, ResultOrder.NameAscending, ResultOrder.NameDescending };
+        if (stations.Any(s => s.IsTrack))
+        {
+            if (stations.Any(s => s.DateModified.HasValue)) orders.AddRange([ResultOrder.DateModifiedDescending, ResultOrder.DateModifiedAscending]);
+            if (stations.Any(s => s.FileSizeBytes.HasValue)) orders.AddRange([ResultOrder.FileSizeDescending, ResultOrder.FileSizeAscending]);
+        }
+        else
+        {
+            orders.AddRange([ResultOrder.BitrateDescending, ResultOrder.BitrateAscending]);
+            if (stations.Any(s => s.Listeners.HasValue)) orders.AddRange([ResultOrder.ListenersDescending, ResultOrder.ListenersAscending]);
+        }
+        return orders.ToArray();
+    }
+
+    internal ResultView RetainAvailable(IReadOnlyList<Station> stations, bool fileIndex = false)
     {
         var format = Format;
         var order = Order;
         if (format != null && !stations.Any(s => Names.Equals(s.Format, format))) format = null;
-        if (order is ResultOrder.ListenersAscending or ResultOrder.ListenersDescending && !stations.Any(s => s.Listeners.HasValue))
-            order = ResultOrder.Search;
+        if (!AvailableOrders(stations).Contains(order)) order = ForSearch(fileIndex).Order;
         return new(format, order);
     }
 
@@ -25,14 +48,19 @@ internal readonly record struct ResultView(string? Format = null, ResultOrder Or
     {
         var format = Format;
         var visible = stations.Where(s => format == null || Names.Equals(s.Format, format));
+        var names = stations.Any(s => s.IsTrack) ? FileNames : Names;
         return (Order switch
         {
-            ResultOrder.NameAscending => visible.OrderBy(s => s.Name, Names),
-            ResultOrder.NameDescending => visible.OrderByDescending(s => s.Name, Names),
+            ResultOrder.NameAscending => visible.OrderBy(s => s.Name, names),
+            ResultOrder.NameDescending => visible.OrderByDescending(s => s.Name, names),
             ResultOrder.BitrateDescending => visible.OrderBy(s => !s.Bitrate.HasValue).ThenByDescending(s => s.Bitrate),
             ResultOrder.BitrateAscending => visible.OrderBy(s => !s.Bitrate.HasValue).ThenBy(s => s.Bitrate),
             ResultOrder.ListenersDescending => visible.OrderBy(s => !s.Listeners.HasValue).ThenByDescending(s => s.Listeners),
             ResultOrder.ListenersAscending => visible.OrderBy(s => !s.Listeners.HasValue).ThenBy(s => s.Listeners),
+            ResultOrder.DateModifiedDescending => visible.OrderBy(s => !s.DateModified.HasValue).ThenByDescending(s => s.DateModified),
+            ResultOrder.DateModifiedAscending => visible.OrderBy(s => !s.DateModified.HasValue).ThenBy(s => s.DateModified),
+            ResultOrder.FileSizeDescending => visible.OrderBy(s => !s.FileSizeBytes.HasValue).ThenByDescending(s => s.FileSizeBytes),
+            ResultOrder.FileSizeAscending => visible.OrderBy(s => !s.FileSizeBytes.HasValue).ThenBy(s => s.FileSizeBytes),
             _ => visible
         }).ToArray();
     }

@@ -6,11 +6,81 @@ internal enum StreamAction { Copy = 1, Save, Foobar, OpenDefault, Preview, Selec
 
 internal sealed class StreamList : ListView
 {
-    internal const string PlayLabel = "Play stream";
-    internal const string BrowserLabel = "Open stream in browser";
+    internal const string PlayLabel = "Play result";
+    internal const string BrowserLabel = "Open address in browser";
+    private const int MinimumNameWidth = 145;
     private bool selectingAll;
     internal event Action<StreamAction>? Command;
+    internal bool ShowsFileColumns { get; private set; }
     internal string? CurrentLine => (FocusedItem ?? (SelectedItems.Count > 0 ? SelectedItems[0] : null))?.Text;
+    internal bool TracksSelected => SelectedItems.Count > 0 &&
+        SelectedItems.Cast<ListViewItem>().All(row => row.Tag is Station { IsTrack: true });
+
+    internal StreamList() => Columns.Add("Stream", 560);
+
+    internal void SetFileColumns(bool show)
+    {
+        if (ShowsFileColumns == show) return;
+        ShowsFileColumns = show;
+        OwnerDraw = show;
+        Columns[0].Text = show ? "Name" : "Stream";
+        HeaderStyle = show ? ColumnHeaderStyle.Nonclickable : ColumnHeaderStyle.Clickable;
+        if (show)
+        {
+            Columns.Add("Format", WidthFor("Ogg Vorbis"));
+            Columns.Add("Size", WidthFor("999.9 GiB"), HorizontalAlignment.Right);
+            Columns.Add("Date modified", WidthFor("30 September 2030, 23:59"));
+        }
+        else
+        {
+            while (Columns.Count > 1) Columns.RemoveAt(Columns.Count - 1);
+        }
+        ResizeNameColumn();
+
+        int WidthFor(string example) => TextRenderer.MeasureText(example, Font).Width + 20;
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        if (Columns.Count > 0) ResizeNameColumn();
+    }
+
+    private void ResizeNameColumn()
+    {
+        int metadataWidth = Columns.Cast<ColumnHeader>().Skip(1).Sum(column => column.Width);
+        Columns[0].Width = Math.Max(MinimumNameWidth,
+            ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 4 - metadataWidth);
+    }
+
+    protected override void OnDrawColumnHeader(DrawListViewColumnHeaderEventArgs e)
+    {
+        e.DrawDefault = true;
+        base.OnDrawColumnHeader(e);
+    }
+
+    protected override void OnDrawSubItem(DrawListViewSubItemEventArgs e)
+    {
+        if (e.ColumnIndex == 0 && e.Item is FileResultItem file)
+        {
+            // WinForms uses item.Text as the accessible row name. Keep that text complete and draw the filename here.
+            bool selected = file.Selected && (Focused || !HideSelection);
+            bool highlighted = selected && (Focused || SystemInformation.HighContrast);
+            var background = highlighted ? SystemColors.Highlight : selected ? SystemColors.Control : BackColor;
+            var foreground = highlighted ? SystemColors.HighlightText : ForeColor;
+            var bounds = e.Bounds;
+            bounds.Width = Math.Min(bounds.Width, e.Header?.Width ?? bounds.Width);
+            var textBounds = bounds.Width > 8 ? Rectangle.Inflate(bounds, -4, 0) : bounds;
+            using var fill = new SolidBrush(background);
+            e.Graphics.FillRectangle(fill, bounds);
+            TextRenderer.DrawText(e.Graphics, file.DisplayName, Font, textBounds, foreground,
+                TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis |
+                TextFormatFlags.NoPrefix | TextFormatFlags.PreserveGraphicsClipping);
+            if (Focused && file.Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(e.Graphics, bounds, foreground, background);
+        }
+        else e.DrawDefault = true;
+        base.OnDrawSubItem(e);
+    }
 
     internal static bool OpensMenu(Keys key) => key is Keys.Apps or (Keys.Shift | Keys.F10);
     internal static bool PreviewsStream(Keys key) => key == Keys.Enter;
@@ -106,20 +176,35 @@ internal sealed class StreamList : ListView
         bool single = SelectedItems.Count == 1;
         var row = (FocusedItem is { Selected: true } focused ? focused : SelectedItems[0]).Bounds;
         var position = screen ?? PointToScreen(new Point(row.Left + 10, row.Bottom));
-        var picked = (StreamAction)NativeRowMenu.Show(owner, position, MenuItems(single));
+        var picked = (StreamAction)NativeRowMenu.Show(owner, position, MenuItems(single, TracksSelected));
         if (picked != 0) Command?.Invoke(picked);
     }
 
-    internal static (int Id, string Caption, bool Enabled)[] MenuItems(bool single) =>
+    internal static (int Id, string Caption, bool Enabled)[] MenuItems(bool single, bool tracks = false) =>
     [
-        ((int)StreamAction.Preview, "&" + PlayLabel + "\tEnter", single),
+        ((int)StreamAction.Preview, "&" + (tracks ? single ? "Play track" : "Play selected tracks" : PlayLabel) + "\tEnter", single || tracks),
         ((int)StreamAction.OpenBrowser, "&" + BrowserLabel + "\tAlt+Enter", single),
-        ((int)StreamAction.Copy, (single ? "&Copy stream address" : "&Copy stream addresses") + "\tCtrl+C", true),
+        ((int)StreamAction.Copy, (single ? "&Copy address" : "&Copy addresses") + "\tCtrl+C", true),
         ((int)StreamAction.Review, "Re&view text...\tF4", true),
         ((int)StreamAction.Save, "&Save playlist...\tCtrl+S", true),
         ((int)StreamAction.Foobar, "&Add to Foobar2000\tCtrl+Shift+F", true),
         ((int)StreamAction.OpenDefault, "Save and open in &default player\tShift+Enter", true)
     ];
+}
+
+internal sealed class FileResultItem : ListViewItem
+{
+    internal string DisplayName { get; }
+
+    internal FileResultItem(Station station, string displayName)
+    {
+        DisplayName = displayName;
+        var size = station.FileSizeLabel ?? "Not listed";
+        var modified = station.DateModifiedLabel ?? "Not listed";
+        Text = $"{displayName}, {station.Format}, Size {size}, Date modified {modified}";
+        SubItems.AddRange([station.Format, size, modified]);
+        Tag = station;
+    }
 }
 
 internal static class NativeRowMenu

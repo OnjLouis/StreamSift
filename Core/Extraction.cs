@@ -15,6 +15,9 @@ internal static partial class Extraction
     [GeneratedRegex("""\b(?:[a-z0-9_-]{0,40}(?:stream|audio)_?(?:url|uri|src)|stream|audio|mount|hls(?:_?url)?)["']?\s*[:=]\s*["']([^"'<>]{1,2048})["']""",
         RegexOptions.IgnoreCase, 300)]
     private static partial Regex AssignedUrls();
+    [GeneratedRegex("""\b(?:download[_-]?)?playlist(?:[_-]?download)?(?:[_-]?(?:url|uri|src|href))?["']?\s*[:=]\s*["']([^"'<>]{1,2048})["']""",
+        RegexOptions.IgnoreCase, 300)]
+    private static partial Regex AssignedPlaylists();
     [GeneratedRegex("""<script\b[^>]{0,100}\bsrc\s*=\s*["']([^"'\s?<>]{1,1024}\.js)(?:[?"'])""", RegexOptions.IgnoreCase, 250)]
     private static partial Regex ScriptLiterals();
     [GeneratedRegex("""\bwindow\.open\(\s*["']([^"'\s?<>]{1,1024})(?:[?"'])""", RegexOptions.IgnoreCase, 250)]
@@ -39,7 +42,8 @@ internal static partial class Extraction
     private const string TritonProvisioning = "/api/livestream";
     private const string TritonRedirect = "/api/livestream-redirect/";
     private static readonly XNamespace TritonSchema = "http://provisioning.streamtheworld.com/player/livestream-1.9";
-    internal sealed record Extracted(bool LiveHls, string[]? VideoCdnHosts, bool IsDirectory, List<Link> Links, ServerListing? Server);
+    internal sealed record Extracted(bool LiveHls, string[]? VideoCdnHosts, bool IsDirectory, List<Link> Links,
+        ServerListing? Server, FileIndex? FileIndex);
 
     internal static Uri? OfficialCatalogue(Uri page)
     {
@@ -59,7 +63,8 @@ internal static partial class Extraction
         return new Link(audio, page, LinkKind.Audio, Label(Uri.UnescapeDataString(slug).Replace('-', ' ')), true);
     }
 
-    internal static Extracted Read(string text, string mime, Uri page, Link source, Uri site, CancellationToken token)
+    internal static Extracted Read(string text, string mime, Uri page, Link source, Uri site, CancellationToken token,
+        bool allowFileIndex = false)
     {
         var links = new List<Link>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -68,6 +73,7 @@ internal static partial class Extraction
         string[]? videoCdnHosts = null;
         bool directory = false;
         ServerListing? server = null;
+        FileIndex? fileIndex = null;
         try
         {
             if (source.TuneInId != null && TuneIn.IsService(page))
@@ -100,7 +106,7 @@ internal static partial class Extraction
                 Html(trim);
         }
         catch (Exception e) when (e is RegexMatchTimeoutException or XmlException or JsonException) { }
-        return new(hls, videoCdnHosts, directory, links, server);
+        return new(hls, videoCdnHosts, directory, links, server, fileIndex);
 
         void Add(string? value, LinkKind kind, string? name = null, bool hint = false, Uri? relative = null,
             NameOrigin nameOrigin = NameOrigin.Inferred, Uri? wrapper = null, bool keepAddress = false, int? listeners = null,
@@ -154,6 +160,7 @@ internal static partial class Extraction
         void Html(string body)
         {
             var document = new HtmlParser().ParseDocument(body);
+            if (allowFileIndex && (fileIndex = FileIndex.Read(document, page, token)) != null) return;
             var title = Label(document.Title) ?? source.Name;
             int appEntryScripts = 0;
             if (source.Kind == LinkKind.Player && ServerListings.IsStatusPage(page))
@@ -362,7 +369,7 @@ internal static partial class Extraction
                 }
             }
             foreach (var script in document.Scripts.Where(s => !s.HasAttribute("src")))
-                ScanText(script.TextContent, title);
+                ScanText(script.TextContent, title, playlistBase: baseUrl);
             // Some station sites print the direct address as text instead of a link.
             ScanText(document.Body?.TextContent ?? "", title, playerCode: false);
         }
@@ -411,7 +418,7 @@ internal static partial class Extraction
             }
         }
 
-        void ScanText(string value, string? name, bool playerCode = true)
+        void ScanText(string value, string? name, bool playerCode = true, Uri? playlistBase = null)
         {
             if (playerCode) value = CommentLines().Replace(value, "");
             value = value.Replace("\\/", "/").Replace("\\u002F", "/", StringComparison.OrdinalIgnoreCase)
@@ -420,6 +427,12 @@ internal static partial class Extraction
             foreach (Match match in AssignedUrls().Matches(value)) Candidate(match.Groups[1].Value, name, true);
             foreach (Match match in WebUrls().Matches(value)) Candidate(match.Value.TrimEnd(')', ']', ','), name);
             if (!playerCode) return;
+            playlistBase ??= source.Kind == LinkKind.Script ? source.FoundOn : page;
+            foreach (Match match in AssignedPlaylists().Matches(value))
+            {
+                if (PublicNetwork.TryUrl(WebUtility.HtmlDecode(match.Groups[1].Value), playlistBase, out var playlist) && Playlist(playlist))
+                    Add(playlist.AbsoluteUri, LinkKind.Playlist, name);
+            }
             foreach (Match match in ScriptLiterals().Matches(value)) AddPlayerLiteral(match, LinkKind.Script);
             foreach (Match match in WindowLiterals().Matches(value)) AddPlayerLiteral(match, LinkKind.Player);
 

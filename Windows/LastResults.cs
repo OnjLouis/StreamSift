@@ -14,7 +14,7 @@ internal sealed record LastResults(string Input, SearchMethod Method, Station[] 
             (!SearchSequence.CanSearchStation(input) && (!PublicNetwork.TryInput(input, out var source) || !StableAddress(source))))
             return null;
         // HLS servers can embed session identifiers in a path, not just the query string.
-        var safe = stations.Where(s => s != null && !s.IsHls && !s.IsVideo && s.Format != "HLS" &&
+        var safe = stations.Where(s => s != null && !s.IsHls && !s.IsVideo && !s.IsTrack && s.Format != "HLS" &&
                 SafeText(s.Name, 512) && SafeText(s.Format, 32) && StableAddress(s.Url) && StableAddress(s.FoundOn))
             .DistinctBy(s => s.Url).Take(MaxStations).ToArray();
         if (safe.Length == 0) return null;

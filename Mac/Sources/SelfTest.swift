@@ -27,6 +27,16 @@ func selfTest() throws {
     try require(!Preferences(reading: defaults).startupUpdates, "An explicit startup update opt-out stays off")
     defaults.set(true, forKey: "CheckUpdatesAtStartup")
     try require(!Preferences(reading: defaults).automaticFallback, "Older settings leave fallback off")
+    let savedPlayerPath = root.appendingPathComponent("Portable Player.app").path
+    defaults.set("custom", forKey: "MediaPlayer")
+    defaults.set(savedPlayerPath, forKey: "CustomPlayerPath")
+    Preferences(reading: defaults).save(to: defaults)
+    try require(defaults.string(forKey: "MediaPlayer") == "custom" &&
+                defaults.string(forKey: "CustomPlayerPath") == savedPlayerPath,
+                "A selected custom player survives saving even if the app is currently unavailable")
+    try require(MediaPlayerChoice.choices(customPath: nil) == [.automatic, .vlc, .fastPlay] &&
+                MediaPlayerChoice.choices(customPath: savedPlayerPath) == [.automatic, .vlc, .fastPlay, .custom],
+                "The player list includes Custom only after a path is chosen")
     prefs.sounds = false
     prefs.startupUpdates = true
     prefs.automaticFallback = true
@@ -81,9 +91,51 @@ func selfTest() throws {
                             foundOn: stable.foundOn)
     let video = Station(name: "Video", url: "https://radio.example/opaque-session/video.mp4", format: "MP4 video", bitrate: nil,
                         foundOn: stable.foundOn, isVideo: true)
+    let trackReply = try JSONDecoder().decode(SearchResult.self, from: Data(#"""
+        {"stations":[{"name":"Theme","url":"https://radio.example/opaque-session/track.mp3","format":"MP3",
+        "foundOn":"https://radio.example/opaque-session/track.mp3","isTrack":true}],"requests":1,"unreachable":0,"limitReached":false}
+        """#.utf8))
+    let (track, trackSummary) = (trackReply.stations[0], trackReply.summary)
+    try require(track.listLabel(named: track.name) == "Theme, Track, MP3" && trackSummary == "1 track found. Checked 1 address." &&
+                DetailRow.rows(for: track, selectedCount: 1).first?.label == "Track address", "Direct tracks have accessible track labels")
+    var small = track
+    small.fileSizeBytes = 100
+    small.dateModified = "2025-01-01T00:00:00"
+    var large = track
+    large.fileSizeBytes = 9_000_000_000
+    large.dateModified = "2020-01-01T00:00:00"
+    let tracks = [track, small, large]
+    let largest = ResultView(order: .fileSizeDescending)
+    try require(ResultView.availableOrders(tracks) == [.search, .nameAscending, .nameDescending, .dateModifiedDescending,
+                    .dateModifiedAscending, .fileSizeDescending, .fileSizeAscending] &&
+                !ResultView.availableOrders([safe]).contains(.fileSizeAscending) && largest.retainingAvailable(in: [track]).order == .search,
+                "Directory sort choices are limited to metadata present in the results")
+    try require(largest.apply(tracks) == [large, small, track] && ResultView(order: .fileSizeAscending).apply(tracks) == [small, large, track] &&
+                ResultView(order: .dateModifiedDescending).apply(tracks) == [small, large, track] &&
+                ResultView(order: .dateModifiedAscending).apply(tracks) == [large, small, track], "Directory sorting puts missing values last")
+    let fileTable = StreamTable()
+    let nameColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(FileResultColumn.name.rawValue))
+    nameColumn.title = "Stream"
+    fileTable.addTableColumn(nameColumn)
+    fileTable.setFileColumns(true)
+    var recorded = track
+    recorded.fileSizeLabel = "631 KiB"
+    recorded.dateModifiedLabel = "5 December 2019, 13:38"
+    try require(fileTable.tableColumns.map(\.title) == ["Name", "Format", "Size", "Date modified"] && fileTable.headerView != nil &&
+                FileResultColumn.allCases.map { $0.value(for: recorded, named: "Theme") } == ["Theme", "MP3", "631 KiB", "5 December 2019, 13:38"] &&
+                FileResultColumn.size.value(for: track, named: "Theme") == "Not listed" &&
+                FileResultColumn.reviewLine(for: recorded, named: "Theme") == "Theme, MP3, Size 631 KiB, Date modified 5 December 2019, 13:38",
+                "Native directory columns and the full review line present the listed metadata")
+    fileTable.setFileColumns(false)
+    try require(fileTable.tableColumns.map(\.title) == ["Stream"], "Return to the original radio result column")
+    let trackName = DetailRow.rows(for: recorded, selectedCount: 1).first { $0.kind == .station }!
+    let stationName = DetailRow.rows(for: row, selectedCount: 1).first { $0.kind == .station }!
+    try require(ContextGuide.detail(trackName, canSearch: true).hasPrefix("This is the track name shown in the results.") &&
+                ContextGuide.detail(stationName, canSearch: true).hasPrefix("This is the station name shown in the results."),
+                "Focused name help describes tracks and stations separately")
     let view = ResultView(format: "AAC", order: .listenersDescending)
     guard let saved = LastResults.capture(input: "radio.example:9020", mode: .passive,
-                                         stations: [addressed, local, temporary, video, stable, safe, safe], view: view,
+                                         stations: [addressed, local, temporary, video, track, stable, safe, safe], view: view,
                                          selection: safe.url) else { throw UpdateFailure.invalid("No restorable streams") }
     try require(saved.stations == [stable, safe], "Only reusable streams are remembered")
     saved.save(to: defaults)
@@ -110,7 +162,7 @@ func selfTest() throws {
                     lines.contains { $0.hasPrefix("Shift+Return:") } == (item.kind == .streamAddress) &&
                     lines.contains("F4: Review the full line."), "F1 commands match the focused row")
     }
-    try require(ContextGuide.detail(direct[0], canSearch: true).contains("Return: Open Save Stream Playlist") &&
+    try require(ContextGuide.detail(direct[0], canSearch: true).contains("Return: Open Save Playlist") &&
                 ContextGuide.detail(direct[1], canSearch: true).contains("Return: Scan the server root") &&
                 ContextGuide.detail(detail[1], canSearch: true).contains("Return: Search the source page.") &&
                 !ContextGuide.detail(direct[0], canSearch: false).contains("\nReturn:") &&
@@ -168,6 +220,15 @@ func selfTest() throws {
     }
     let unknown = Station(name: "Local", url: "https://radio.example/local", format: "MP3", bitrate: nil, foundOn: "")
     let mixed = [unknown, row, quiet]
+    let mixedFileNames = ["Zebra", "Alpha 10", "alpha 2", "baker"].map {
+        Station(name: $0, url: track.url, format: track.format, bitrate: nil, foundOn: track.foundOn, isTrack: true)
+    }
+    try require(ResultView(order: .nameAscending).apply(mixedFileNames).map(\.name) == ["alpha 2", "Alpha 10", "baker", "Zebra"],
+                "Filename sorting mixes uppercase and lowercase and puts 2 before 10")
+    try require(ResultView.forSearch(fileIndex: true).apply(mixedFileNames).map(\.name) == ["alpha 2", "Alpha 10", "baker", "Zebra"] &&
+                ResultView.forSearch(fileIndex: false).apply(mixed) == mixed &&
+                ResultView().retainingAvailable(in: mixedFileNames, fileIndex: true).apply(mixedFileNames) == mixedFileNames,
+                "Directories default to filename order, radio uses search order, and refresh preserves explicit Listed order")
     try require(ResultView.formats(mixed) == ["AAC", "MP3"] && ResultView.formats([quiet]) == ["AAC"],
                 "Format choices are derived from the current results")
     try require(ResultView(format: "AAC").apply(mixed) == [quiet] && ResultView().apply(mixed) == mixed &&
@@ -221,14 +282,36 @@ func selfTest() throws {
                 "FastPlay association and explicit VLC selection use different native targets")
     let otherPlayer = root.appendingPathComponent("Other Player.app")
     let fallback = StreamPreview.target(choice: .automatic, associated: otherPlayer, associatedIdentifier: "test.player", installed: installed)
-    try require(fallback?.app == otherPlayer && fallback?.needsPlaylist == true &&
-                StreamPreview.target(choice: .vlc, associated: otherPlayer, associatedIdentifier: "test.player", installed: { _ in nil })?.app == otherPlayer,
-                "Default playlist apps get a temporary file even when an explicit player is missing")
+    try require(fallback?.app == otherPlayer && fallback?.needsPlaylist == true,
+                "Automatic gives the default playlist app a temporary file")
+    try require(StreamPreview.target(choice: .vlc, associated: otherPlayer, associatedIdentifier: "test.player", installed: { _ in nil }) == nil &&
+                StreamPreview.target(choice: .fastPlay, associated: vlc, associatedIdentifier: MediaPlayerChoice.vlc.bundleIdentifier, installed: { _ in nil }) == nil,
+                "An unavailable preset never launches the registered default")
+    try require(StreamPreview.target(choice: .custom, customPath: savedPlayerPath, associated: vlc,
+                    associatedIdentifier: MediaPlayerChoice.vlc.bundleIdentifier, installed: installed) == nil,
+                "An unavailable custom app never falls back to the system player")
+    let customApp = URL(fileURLWithPath: savedPlayerPath, isDirectory: true)
+    let contents = customApp.appendingPathComponent("Contents")
+    let executable = contents.appendingPathComponent("MacOS/Player")
+    try FileManager.default.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let appMetadata = ["CFBundleIdentifier": "test.portable.player", "CFBundleExecutable": "Player", "CFBundlePackageType": "APPL"]
+    try PropertyListSerialization.data(fromPropertyList: appMetadata, format: .xml, options: 0)
+        .write(to: contents.appendingPathComponent("Info.plist"))
+    try Data("#!/bin/sh\n".utf8).write(to: executable)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+    let custom = StreamPreview.target(choice: .custom, customPath: savedPlayerPath, associated: vlc,
+                                      associatedIdentifier: MediaPlayerChoice.vlc.bundleIdentifier, installed: installed)
+    try require(custom?.app == customApp && custom?.player == .custom && custom?.needsPlaylist == true &&
+                StreamPreview.customApplication(Bundle.main.bundleURL.path) == nil,
+                "A chosen app receives a playlist and StreamSift cannot select itself")
     let temp = root.appendingPathComponent("handoffs", isDirectory: true)
-    let tempFirst = try PlaybackHandoff.stage(row, in: temp)
-    let tempSecond = try PlaybackHandoff.stage(row, in: temp)
+    let tempFirst = try PlaybackHandoff.stage([row], in: temp)
+    let tempSecond = try PlaybackHandoff.stage([row, track], in: temp)
     let beforeCleanup = try Data(contentsOf: tempFirst)
-    try require(tempFirst != tempSecond && beforeCleanup == Data(expected.utf8), "Two distinct FastPlay handoffs contain one correct stream each")
+    let batchData = try Data(contentsOf: tempSecond)
+    let expectedBatch = try Playlist.data([row, track])
+    try require(tempFirst != tempSecond && beforeCleanup == Data(expected.utf8) && batchData == expectedBatch,
+                "Single and batch handoffs preserve the selected entries")
     let extra = temp.appendingPathComponent("unrelated.m3u8")
     try Data(expected.utf8).write(to: extra)
     let remaining = try PlaybackHandoff.prune(in: temp, now: Date().addingTimeInterval(PlaybackHandoff.retention + 5))
@@ -255,7 +338,7 @@ func selfTest() throws {
     }
     let response = #"{"stations":[],"requests":5,"unreachable":3,"limitReached":true}"#
     let empty = try JSONDecoder().decode(SearchResult.self, from: Data(response.utf8))
-    try require(empty.summary == "No live streams verified. Checked 5 addresses. 3 unavailable. Search limit reached.", "Scanner reply")
+    try require(empty.summary == "No playable streams or files found. Checked 5 addresses. 3 unavailable. Search limit reached.", "Scanner reply")
     var output = ScannerOutput(fallback: true)
     let prefix = output.receive(Data("--bro".utf8))
     let progress = output.receive(Data("wser-json\r\n--directory-json\n".utf8) + Data(response.utf8))

@@ -4,9 +4,16 @@ using System.Text;
 namespace StreamSift;
 
 public sealed record Station(string Name, Uri Url, string Format, int? Bitrate, Uri FoundOn, bool IsHls, int? Listeners = null,
-    bool IsVideo = false);
+    bool IsVideo = false, bool IsTrack = false)
+{
+    public DateTime? DateModified { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? DateModifiedLabel => DateModified?.ToString("d MMMM yyyy, HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+    public long? FileSizeBytes { get; init; }
+    public string? FileSizeLabel { get; init; }
+}
 public sealed record SearchResult(IReadOnlyList<Station> Stations, int Requests, int Unreachable, bool LimitReached,
-    bool EntryWasWebsite = false);
+    bool EntryWasWebsite = false, bool EntryWasFileIndex = false);
 
 internal enum LinkKind { Audio, Video, Playlist, Player, DedicatedPlayer, Script, Catalogue, ServerStatus }
 internal enum NameOrigin { Inferred, Directory, Playlist }
@@ -53,6 +60,7 @@ public sealed class Discovery(HttpClient client)
         int requestLimit = PageRequests, resultLimit = PageResults;
         Uri? site = null;
         ServerListing? server = null;
+        FileIndex? fileIndex = null;
         bool serverLimit = false, usedServerListing = false, entryWasWebsite = false;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancel);
         deadline.CancelAfter(ScanLimit);
@@ -76,6 +84,7 @@ public sealed class Discovery(HttpClient client)
             while (true)
             {
                 deadline.Token.ThrowIfCancellationRequested();
+                if (fileIndex != null) break;
                 if (server != null)
                 {
                     deadline.CancelAfter(ServerScanLimit);
@@ -165,7 +174,17 @@ public sealed class Discovery(HttpClient client)
                                 Add(final, item.Link, stationName, codec, bitrate, false, compatible);
                                 verified = true;
                             }
-                            continue; // A finite MP3 or podcast is not a live station.
+                            else if (observed == null && entry && requests == 1 && status == null &&
+                                     response.StatusCode == HttpStatusCode.OK && response.Content.Headers.ContentLength > 0 &&
+                                     final.Scheme == "https" && final.Query.Length == 0 &&
+                                     (IsAudioType(kind) || kind is "application/octet-stream" or "application/ogg") &&
+                                     stationName == null && bitrate == null && Header(response, "icy-metaint") == null)
+                            {
+                                // Offer finite media only when the supplied address serves the audio itself.
+                                Add(final, item.Link, null, codec, null, false, track: true);
+                                verified = true;
+                            }
+                            continue;
                         }
                         if (!Extraction.LooksLikeText(prefix)) continue;
                         var textCap = Extraction.IsWatchPage(final) ? WatchPageTextLimit : TextLimit;
@@ -212,6 +231,8 @@ public sealed class Discovery(HttpClient client)
         }
         catch (OperationCanceledException) when (!cancel.IsCancellationRequested) { }
         cancel.ThrowIfCancellationRequested();
+        if (fileIndex != null)
+            return new(fileIndex.Tracks, requests, failures, fileIndex.Truncated, EntryWasWebsite: true, EntryWasFileIndex: true);
         var ordered = usedServerListing ? results.Values.OrderBy(s => s.Name, StringComparer.InvariantCultureIgnoreCase) :
             results.Values.OrderBy(s => s.IsVideo).ThenBy(s => s.IsHls).ThenBy(s => s.Url.Scheme != "https");
         return new(ordered.ToArray(), requests + serverRequests, failures,
@@ -247,7 +268,15 @@ public sealed class Discovery(HttpClient client)
                 return; // Browser candidates are media, not new starting points for the website crawl.
             if (source.Kind == LinkKind.Video && !text.TrimStart('\uFEFF', ' ', '\r', '\n', '\t')
                     .StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase)) return;
-            var info = Extraction.Read(text, type, address, source, site ?? start, deadline.Token);
+            bool allowFileIndex = observed == null && depth == 0 && source.Url == start &&
+                type is "text/html" or "application/xhtml+xml" && FileIndex.SameOrigin(start, address) &&
+                address.Scheme == "https" && start.Query.Length == 0 && address.Query.Length == 0;
+            var info = Extraction.Read(text, type, address, source, site ?? start, deadline.Token, allowFileIndex);
+            if (info.FileIndex is FileIndex index)
+            {
+                fileIndex = content.Length <= textCap ? index : index with { Truncated = true };
+                return;
+            }
             if (observed == null && info.Server != null && (depth == 0 || source.Kind == LinkKind.ServerStatus))
                 server = info.Server;
             if (info.IsDirectory && observed == null)
@@ -296,7 +325,7 @@ public sealed class Discovery(HttpClient client)
         }
 
         void Add(Uri address, Link source, string? name, string format, int? bitrate, bool hls, Uri? compatible = null,
-            bool video = false)
+            bool video = false, bool track = false)
         {
             var stable = names.GetValueOrDefault(source.Url.AbsoluteUri) ?? names.GetValueOrDefault(address.AbsoluteUri);
             var title = stable?.Name ?? Extraction.StationName(name) ?? Extraction.StationName(source.Name) ??
@@ -305,7 +334,7 @@ public sealed class Discovery(HttpClient client)
             var playbackAddress = !video && (source.KeepAddress || (observed != null && source.Kind == LinkKind.Audio))
                 ? source.Url : address;
             var station = new Station(title, compatible ?? playbackAddress, format, bitrate, stable?.FoundOn ?? source.FoundOn, hls,
-                stable?.Listeners ?? source.Listeners, video);
+                stable?.Listeners ?? source.Listeners, video, track);
             if (!results.TryAdd(key, station) && address.Scheme == "https" && results[key].Url.Scheme == "http") results[key] = station;
         }
     }

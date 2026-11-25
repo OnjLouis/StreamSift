@@ -1,6 +1,6 @@
 # StreamSift
 
-StreamSift finds public live audio streams behind radio websites. It has
+StreamSift finds public radio streams, video and audio files. It has
 native Windows and Mac apps with keyboard-operated results, address copying,
 M3U8 export and opening in the system's default playlist player. The Windows
 app can also send streams to an installed copy of foobar2000.
@@ -8,6 +8,15 @@ Enter or Return sends the selected result to the chosen media player.
 Automatic uses the system default playlist app when available; neither
 choice adds a saved playlist. Saving and opening a playlist still uses
 the system default.
+Find Streams and Files also accepts a directly entered public HTTPS audio file that
+opens without a redirect, query string or sign-in. A verified file appears
+as a Track. Use Enter or Return to play it. Track addresses are left out of
+recent searches and restored results. This works with media file addresses
+such as a public MP3 link supplied by its publisher.
+Public HTTPS indexes with the standard “Index of” heading list the audio
+files in the current folder. Select one or more tracks and press Enter or
+Return to play the selection in the chosen player. Filter and Sort can order
+these tracks by modified date and file size where shown in the index.
 The editable address field remembers the last ten successful searches.
 Select multiple results to save them as one playlist.
 Results can be filtered by format, sorted by name, bitrate or reported
@@ -30,8 +39,8 @@ It does not send your search text to the directories.
 When the Radio Browser cache needs refreshing, StreamSift can try another
 public mirror if one is unavailable.
 
-Optional automatic fallback runs the selected method first. When no live
-stream is verified, it tries the remaining methods in website, directory, then
+Optional automatic fallback runs the selected method first. When no
+result is found, it tries the remaining methods in website, radio directory, then
 browser order. This is off by default on both platforms.
 
 Website and browser searches also recognise public MP4 and WebM video and

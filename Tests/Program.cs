@@ -272,6 +272,78 @@ Require(results.Requests == handler.Seen.Count && !results.LimitReached, "Reques
 Require(results.Stations.All(x => !x.Url.AbsoluteUri.Contains("oldshow") && !x.Url.AbsoluteUri.Contains("vod")), "Recording returned as live.");
 Require(results.Unreachable == 1, "Blocked redirect not counted.");
 
+const string directTrackUrl = "https://station.example/oldshow.mp3";
+var directTrack = await engine.FindAsync(new Uri(directTrackUrl), CancellationToken.None);
+Require(directTrack.Stations is [{ Format: "MP3", IsTrack: true, IsHls: false, IsVideo: false }] &&
+    directTrack.Stations[0].Url.AbsoluteUri == directTrackUrl &&
+    !directTrack.EntryWasWebsite && directTrack.Requests == 1,
+    "A directly entered public audio file is a playable result.");
+handler.Audio("https://station.example/audio?token=test", mp3, finite: true);
+handler.Redirect("https://station.example/redirected.mp3", directTrackUrl);
+handler.Audio("https://station.example/fixedlength.mp3", mp3, "ICY station", finite: true);
+handler.Audio("https://station.example/directlive.mp3", mp3);
+handler.Fail("https://station.example/permission.mp3", HttpStatusCode.Forbidden);
+foreach (var path in new[] { "audio?token=test", "redirected.mp3", "fixedlength.mp3", "permission.mp3" })
+{
+    var excludedTrack = await engine.FindAsync(new Uri($"https://station.example/{path}"), CancellationToken.None);
+    Require(excludedTrack.Stations.Count == 0, $"Do not treat {path} as a public direct track.");
+}
+var directLive = await engine.FindAsync(new Uri("https://station.example/directlive.mp3"), CancellationToken.None);
+Require(directLive.Stations is [{ Format: "MP3", IsTrack: false }], "Direct live MP3 playback still works.");
+
+const string fileIndex = "https://files.example/media/";
+handler.Redirect(fileIndex.TrimEnd('/'), fileIndex);
+handler.Text(fileIndex, """
+    <title>Index of /media</title><h1>Index of /media</h1><table>
+    <tr><th>Icon</th><th><a href="?C=N;O=D">Name</a></th><th>Last modified</th><th>Size</th></tr>
+    <tr><td><a href="../">Parent Directory</a></td></tr>
+    <tr><td><a href="?C=N;O=D">Name</a></td></tr>
+    <tr><td></td><td><a href="%23Welcome%20Home.mp3">#Welcome Home.mp3</a></td><td>2020-10-15 11:42</td><td>631K</td></tr>
+    <tr><td></td><td><a href="/media/Piano.M4A">Piano.M4A</a></td><td>2019-05-02 15:20</td><td>1.5M</td></tr>
+    <tr><td><a href="https://files.example/media/Field%20Notes.flac">Field Notes.flac</a></td></tr>
+    <tr><td><a href="%23Welcome%20Home.mp3">Duplicate</a></td></tr>
+    <tr><td><a href="/elsewhere/other.mp3">Different directory</a></td></tr>
+    <tr><td><a href="https://other.example/media/other.mp3">Different origin</a></td></tr>
+    <tr><td><a href="sub%2Fescaped.mp3">Encoded nested path</a></td></tr>
+    <tr><td><a href="sub/">Subfolder</a></td></tr>
+    <tr><td><a href="archive.zip">Archive</a></td></tr>
+    <tr><td><a href="signed.mp3?key=fixture">Signed URL</a></td></tr>
+    </table>
+    """ + string.Concat(Enumerable.Range(1, 30).Select(i => $"<a href='track{i}.wav'>Track {i}</a>")));
+var indexBefore = handler.Seen.Count;
+var indexed = await engine.FindAsync(new Uri(fileIndex.TrimEnd('/')), CancellationToken.None);
+Require(indexed.Stations.Count == 33 && indexed.Stations.All(row => row.IsTrack && row.FoundOn.AbsoluteUri == fileIndex) &&
+    indexed.Stations.Take(3).Select(row => (row.Name, row.Format)).SequenceEqual(
+        [("#Welcome Home", "MP3"), ("Piano", "M4A"), ("Field Notes", "FLAC")]) &&
+    handler.Seen.Skip(indexBefore).SequenceEqual([fileIndex.TrimEnd('/'), fileIndex]) && !indexed.LimitReached,
+    "List only direct child audio from a public media index, in index order, without fetching the files.");
+Require(indexed.EntryWasFileIndex && indexed.EntryWasWebsite, "Remember the public index and identify its track results.");
+Require(indexed.Stations[0] is { FileSizeBytes: 646144, FileSizeLabel: "631 KiB" } &&
+    indexed.Stations[0].DateModified == new DateTime(2020, 10, 15, 11, 42, 0) &&
+    indexed.Stations[1] is { FileSizeBytes: 1572864, FileSizeLabel: "1.5 MiB" } &&
+    indexed.Stations[2] is { FileSizeBytes: null, DateModified: null },
+    "Read date and size from the index columns with no file requests.");
+handler.Text("https://files.example/table/", """
+    <title>Index of /table</title><h1>Index of /table</h1><table>
+      <thead><tr><th scope="col">Name</th><th scope="col">Size</th><th scope="col">Last modified</th></tr></thead>
+      <tbody><tr><td><a href="one.wav">One</a></td><td>5.5 MiB</td><td>15 October 2019, 11:42</td></tr>
+      <tr><td><a href="unknown.mp3">Unknown</a></td><td>12345678901234567890 GiB</td><td>-</td></tr></tbody>
+    </table>
+    """);
+var namedColumns = await engine.FindAsync(new Uri("https://files.example/table/"), CancellationToken.None);
+Require(namedColumns.Stations is [{ FileSizeBytes: 5767168, FileSizeLabel: "5.5 MiB" }, { FileSizeBytes: null, DateModified: null }] &&
+    namedColumns.Stations[0].DateModified == new DateTime(2019, 10, 15, 11, 42, 0),
+    "Column labels allow size before date. Unusable metadata leaves a playable track with unknown values.");
+handler.Text("https://files.example/large/", "<title>Index of /large/</title><h1>Index of /large/</h1>" +
+    string.Concat(Enumerable.Range(1, 520).Select(i => $"<a href='track{i}.flac'>Track {i}</a>")));
+var cappedIndex = await engine.FindAsync(new Uri("https://files.example/large/"), CancellationToken.None);
+Require(cappedIndex.Stations.Count == 512 && cappedIndex.LimitReached && cappedIndex.Requests == 1,
+    "Bound large index results without probing each file.");
+handler.Text("https://files.example/empty/", "<title>Index of /empty</title><h1>Index of /empty</h1><a href='archive.zip'>Archive</a>");
+var emptyIndex = await new SearchSequence(fixtureClient).FindAsync("https://files.example/empty/", SearchMethod.Passive, true, CancellationToken.None);
+Require(emptyIndex.Result.EntryWasFileIndex && emptyIndex.Result.Stations.Count == 0 && emptyIndex.Attempts == 1,
+    "An index with no supported files reports an empty track listing without other search methods.");
+
 handler.Text("https://tv.example/", """<title>Public TV</title><a href="/watch/">Watch live</a>""");
 handler.Text("https://tv.example/watch/", """
     <title>Public TV</title>
@@ -306,6 +378,32 @@ handler.Text("https://radio.example/m3u", "#EXTM3U\n#EXTINF:-1,Relative station\
 handler.Audio("https://radio.example/ownstream", mp3);
 var m3u = await engine.FindAsync(new Uri("https://radio.example/m3u"), CancellationToken.None);
 Require(m3u.Stations is [{ Name: "Relative station" }], "Relative playlist entry.");
+
+handler.Text("https://player.example/public/station", """
+    <title>Station player</title><div id="public-radio-player"></div>
+    <script>
+    window.vueComponent('#public-radio-player', {"componentProps":{
+        "downloadPlaylistUri":"\/public\/station\/playlist.pls",
+        "downloadPlaylistUrl":"station/listen.m3u",
+        "playlistHref":"/local-only.fpl",
+        "playlistArtworkUrl":"/station-artwork.png",
+        "anotherUrl":"/unrelated.pls"
+    }});
+    </script>
+    """);
+handler.Text("https://player.example/public/station/playlist.pls",
+    "[playlist]\nFile1=/listen/live\nTitle1=Station PLS\nLength1=-1\nNumberOfEntries=1\nVersion=2", "audio/x-scpls");
+handler.Text("https://player.example/public/station/listen.m3u",
+    "#EXTM3U\n#EXTINF:-1,Station M3U\n/listen/alternate", "application/octet-stream");
+handler.Audio("https://player.example/listen/live", mp3);
+handler.Audio("https://player.example/listen/alternate", mp3);
+var beforeEmbeddedPlaylists = handler.Seen.Count;
+var embeddedPlaylists = await engine.FindAsync(new Uri("https://player.example/public/station"), CancellationToken.None);
+Require(embeddedPlaylists.Stations.Select(s => s.Name).Order().SequenceEqual(["Station M3U", "Station PLS"]),
+    "Discover relative playlist addresses in player configuration without running the browser.");
+Require(handler.Seen.Skip(beforeEmbeddedPlaylists).All(url =>
+    !url.EndsWith("/local-only.fpl") && !url.EndsWith("/station-artwork.png") && !url.EndsWith("/unrelated.pls")),
+    "Only recognised playlist fields with supported playlist extensions are followed.");
 
 var mp2 = new byte[1300];
 foreach (var i in new[] { 0, 626 }) new byte[] { 0xff, 0xfd, 0xa0, 0x04 }.CopyTo(mp2, i);

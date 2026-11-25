@@ -13,12 +13,12 @@ dd { margin-bottom: .5rem; }
 <body>
 <main>
 <h1>StreamSift for Mac</h1>
-<p id="current-version">Version 1.2.22</p>
+<p id="current-version">Version 1.3.0</p>
 <nav aria-label="Contents">
 <ul>
 <li><a href="#changes">Version history</a></li>
-<li><a href="#find">Find a stream</a></li>
-<li><a href="#listen">Use a stream</a></li>
+<li><a href="#find">Find streams and files</a></li>
+<li><a href="#listen">Use search results</a></li>
 <li><a href="#preferences">Settings</a></li>
 <li><a href="#keys">Keyboard shortcuts</a></li>
 <li><a href="#updates">Updates</a></li>
@@ -27,6 +27,15 @@ dd { margin-bottom: .5rem; }
 </ul>
 </nav>
 <h2 id="changes">Version history</h2>
+<h3>1.3.0</h3>
+<ul>
+<li>Find and play tracks from direct public audio links or public media directory listings.</li>
+<li>Browse directory results with name, format, size and date modified, and sort by name, size or date when the directory supplies those details.</li>
+<li>Move through directory results to hear each track's details with your screen reader.</li>
+<li>Play one track or hand the selected tracks to your player in the displayed order.</li>
+<li>Use Choose Player to select a player for StreamSift.</li>
+<li>Use clearer search, result and help wording for streams, tracks and files.</li>
+</ul>
 <h3>1.2.22</h3>
 <ul>
 <li>Find public video as well as radio and send either to your player without saving a playlist.</li>
@@ -76,71 +85,75 @@ dd { margin-bottom: .5rem; }
 </ul>
 <h3>1.0.0</h3>
 <p>Initial release for Windows and Mac. Find and verify live streams, copy their addresses, and save or open them in a player.</p>
-<h2 id="find">Find a stream</h2>
+<h2 id="find">Find streams and files</h2>
 <p>StreamSift runs on Intel and Apple Silicon Macs with macOS 13 or later. Unzip the download, then move StreamSift to Applications.</p>
 <p>Paste a station website, a player page, a playlist address or a direct stream URL, and press Return. StreamSift follows likely listening links and checks the audio it finds. M3U, PLS and XSPF files are lists of addresses: StreamSift shows the verified streams inside them, not one result per playlist file. Several entries can be different qualities or formats of the same station.</p>
-<p>When results are ready, focus moves to the first stream unless you moved away from the search controls. Use the arrow keys in the Streams list to read each station's name, audio format and bitrate when known. Tab to Stream details for the full address and the page or playlist it came from. If no stream is found, try the station's dedicated Listen Live or How to Listen page. Press Escape to cancel a search.</p>
-<p>StreamSift plays a short sound when a search starts. The completion sound tells you whether streams were found; a different sound plays when nothing is found or the search cannot finish. If automatic fallback is on, the completion sound plays only after the search ends. Cancelling does not play a completion sound. Status announcements still work when sounds are off.</p>
+<p>For a recording, paste a direct public HTTPS audio file address, such as an MP3 link offered by its publisher, and use Find Streams and Files. The link must open without a redirect, query string or sign-in. A verified recording is labelled <strong>Track</strong>. Press Return on the result to play it in the chosen player. Track addresses are left out of recent searches and restored results.</p>
+<p>Paste a public HTTPS directory index, such as <code>https://onj.me/media/</code>, to list up to 512 supported audio files in that folder. StreamSift lists tracks by file extension and the player opens them when you play. Use Return for one track, or press Command+A and then Return to play all visible tracks in order in the chosen player. Subfolders and archives are skipped. StreamSift remembers the directory address so you can run the search again.</p>
+<p>When results are ready, focus moves to the first result unless you moved away from the search controls. Use the arrow keys in Results to move through the list. Radio rows show the station and any available bitrate. Folder rows have columns for name, format, size and date modified. Tab to Details for the full address and the page or playlist it came from. If no stream is found, try the station's dedicated Listen Live or How to Listen page. Press Escape to cancel a search.</p>
+<p>StreamSift plays a short sound when a search starts. The completion sound tells you whether results were found; a different sound plays when nothing is found or the search cannot finish. If automatic fallback is on, the completion sound plays only after the search ends. Cancelling does not play a completion sound. Status announcements still work when sounds are off.</p>
 <p>To browse a streaming server, enter its main address or public status page. StreamSift checks the advertised audio in batches. Large listings may take longer, and some channels may be off air or unavailable in your region. Opening a direct stream address only checks that stream.</p>
 <p>You can paste a TuneIn station page, such as <code>tunein.com/radio/WNYC-FM-939-s21606/</code>. StreamSift checks the public stream addresses for that station and skips entries labelled as a different station.</p>
 <p>Keep the port number when entering a streaming server. For an address such as <code>radio.example:8000</code>, the website search tries HTTPS first and can retry HTTP if it cannot connect. Provide <code>http://</code> explicitly for a server you know uses plain HTTP. An explicit HTTPS address is not changed.</p>
-<p>Enter a station name or call sign, such as <code>WNYC</code>, and use Find Streams. If the name matches a recent successful website search, StreamSift checks that site again. Otherwise it looks in Radio Browser and the <a href="https://iprd-org.github.io/iprd/">International Public Radio Directory</a> (IPRD), verifies the audio, and shows the source in Stream Details. A bare <code>.mp3</code> name is a station-name hint, not a requirement for MP3 audio. If neither source lists the station, use its website address. The first directory search may take longer while the catalogues download. Browser-assisted search requires a website address.</p>
+<p>Enter a station name or call sign, such as <code>WNYC</code>, and use Find Streams and Files. If the name matches a recent successful website search, StreamSift checks that site again. Otherwise it looks in Radio Browser and the <a href="https://iprd-org.github.io/iprd/">International Public Radio Directory</a> (IPRD), verifies the audio, and shows the source in Details. A bare <code>.mp3</code> name is a station-name hint, not a requirement for MP3 audio. If neither source lists the station, use its website address. The first directory search may take longer while the catalogues download. Browser-assisted search requires a website address.</p>
 <p>Some streaming servers offer an alternate address for media players. When StreamSift verifies that the alternate carries the same live MP3 station at the same bitrate, it can show that address instead of listing both versions.</p>
-<p>The <strong>Look Up in Public Directory</strong> button (Command+Shift+D) checks the Radio Browser directory for the website and verifies matching stream addresses. The command is also in Actions. The first lookup downloads a public catalogue, which is cached for up to a day. A channel page only matches entries for that page. To look for other stations on the same network, enter its homepage instead. Directory entries can be out of date.</p>
+<p>The <strong>Look Up in Radio Directory</strong> button (Command+Shift+D) checks the Radio Browser directory for the website and verifies matching stream addresses. The command is also in Actions. The first lookup downloads a public catalogue, which is cached for up to a day. A channel page only matches entries for that page. To look for other stations on the same network, enter its homepage instead. Directory entries can be out of date.</p>
 <p>If the site only exposes the stream after starting its web player, choose <strong>Actions &gt; Find with Browser</strong> or press Command+Shift+Return. This optional search requires Google Chrome or Microsoft Edge. It uses a temporary, muted browser session and verifies whether the media it sees can be opened independently.</p>
 <p>Open the list in the address combo box to choose a recent search, then press Return in the field to search. StreamSift keeps the last ten successful searches, most recent first. Choose File, Clear Search History to remove them.</p>
 <p>StreamSift reopens the last saved results without rescanning or playing anything. The filter, sort order and current row are restored when available. Listener counts are from the original search; press Command+R to refresh. Only reusable results with plain website addresses are saved: HLS rows and addresses with credentials, query strings or fragments are left out. A cancelled search or one without reusable results leaves the earlier saved list available. Choose File, New Search (Command+N) to clear the saved results. This does not remove Search History.</p>
-<h2 id="listen">Use a stream</h2>
-<p>In Streams, press Command+A to select all visible results or hold Shift while moving through the list to select a range. Saving or copying includes the full selection in list order. Stream Details shows the first selected stream when more than one is selected.</p>
-<p>In Stream Details (Command+3), use the arrow keys to choose a row. On <strong>Found on</strong>, Return searches the source page. If the source is the exact same address as the stream, Return scans the server root instead. That keeps the original scheme and port, but may find nothing if the server has no public listing. On <strong>Stream address</strong>, Return opens Save Stream Playlist for an HLS stream, or searches the address for other streams. The saved .m3u8 links to that one live stream; it does not download the broadcast. Return still plays the stream when focus is in Streams.</p>
+<h2 id="listen">Use search results</h2>
+<p>In Results, press Command+A to select all visible results or hold Shift while moving through the list to select a range. Saving or copying includes the full selection in list order. Details shows the first selected result when more than one is selected.</p>
+<p>In Details (Command+3), use the arrow keys to choose a row. On <strong>Found on</strong>, Return searches the source page. If the source is the exact same address as the stream, Return scans the server root instead. That keeps the original scheme and port, but may find nothing if the server has no public listing. On <strong>Stream address</strong>, Return opens Save Playlist for an HLS stream, or searches the address for other streams. The saved .m3u8 links to that one live stream; it does not download the broadcast. Return still plays the stream when focus is in Results.</p>
 <p>On <strong>Stream address</strong>, press Shift+Return to scan the server root, or choose <strong>Scan Stream Server</strong> from the context menu. Option+Return opens an address in your browser. Command+C copies the selected value without the label or extra punctuation. Use VoiceOver+Shift+M or a secondary click to open the context menu.</p>
-<p>In Streams or Stream Details, press F4 or choose <strong>Review Text</strong> from the row's context menu. The full line opens in a read-only text field. Use the arrow keys to read it or select and copy any part. Press Escape to return to the row.</p>
+<p>In Results or Details, press F4 or choose <strong>Review Text</strong> from the row's context menu. The full line opens in a read-only text field. Use the arrow keys to read it or select and copy any part. Press Escape to return to the row.</p>
 <p><strong>Refresh Results:</strong> Press Command+R to repeat the last search using its original address or name and search command. The selection, format filter and sort order are kept where still available. Counts are fetched once during the refresh; there is no automatic polling.</p>
 <p>Press Command+L for <strong>Filter and Sort</strong>. Choose a format that occurs in the current results, or All formats. Sort by station name, bitrate, listener count when reported, or the original search order. Unreported values appear last in numeric orders. Listener counts are snapshots from the scan, not live counters. These choices reset when you start another search. Press Command+F to find text in the visible rows, then use Command+G or Command+Shift+G to continue forward or backward.</p>
+<p>Directory results open in filename order, ignoring case and sorting numbers naturally. Track 2 comes before Track 10. The columns are Name, Format, Size and Date modified. Press F4 to read the full row. Filter and Sort also offers Listed order, track name in reverse, and both directions for date modified and file size when the directory reports them. Missing values come last. Sizes use the values as listed, which can be rounded. Select tracks after sorting to play them in that order.</p>
 <ul>
-<li><strong>Play Stream:</strong> Select one stream and press Return to open its address in the media player chosen in Settings, without saving a playlist in your playlist folder.</li>
-<li><strong>Open Stream in Browser:</strong> Open the selected stream address in your default browser without saving a playlist. The browser decides whether it can play that format.</li>
-<li><strong>Copy Stream Addresses:</strong> Copy the selected URLs, one per line.</li>
-<li><strong>Save Playlist:</strong> Choose a file name and location for one M3U8 playlist containing all selected streams. The dialog starts in the playlist folder from Settings.</li>
+<li><strong>Play Result:</strong> Select one result and press Return to open its address in the media player chosen in Settings, without saving a playlist in your playlist folder.</li>
+<li><strong>Open Address in Browser:</strong> Open the selected address in your default browser without saving a playlist. The browser decides whether it can play that format.</li>
+<li><strong>Copy Addresses:</strong> Copy the selected URLs, one per line.</li>
+<li><strong>Save Playlist:</strong> Choose a file name and location for one M3U8 playlist containing all selected items. The dialog starts in the playlist folder from Settings.</li>
 <li><strong>Open playlist folder:</strong> Open the configured folder in Finder. If it does not exist yet, StreamSift creates it.</li>
-<li><strong>Save and Open in Default Player:</strong> Save the selected streams as one playlist without asking for a name, then open it with the Mac app associated with <code>.m3u8</code> files. Existing playlists are not overwritten. If macOS cannot open the file, the playlist stays saved.</li>
+<li><strong>Save and Open in Default Player:</strong> Save the selected items as one playlist without asking for a name, then open it with the Mac app associated with <code>.m3u8</code> files. Existing playlists are not overwritten. If macOS cannot open the file, the playlist stays saved.</li>
 
 </ul>
 <p>To change which player Shift+Return opens, select an <code>.m3u8</code> file in Finder, choose File, Get Info, select the player under Open with, and choose Change All. The Media player setting does not change this association.</p>
 <h2 id="preferences">Settings</h2>
 <p>Choose StreamSift, Settings or press Command+,.</p>
-<p>In General, turn on <strong>Automatically try other search methods</strong> to try another method if the one you chose finds no playable streams or cannot finish. Find Streams tries the website first, then the public directory, then the browser. If you choose the directory or browser yourself, it runs first and StreamSift tries the other methods in that same order. It stops at the first playable result. This is off by default. Escape cancels the entire search.</p>
+<p>In General, turn on <strong>Automatically try other search methods</strong> to try another method if the one you chose finds no results or cannot finish. Find Streams and Files tries the website first, then the public directory, then the browser. If you choose the directory or browser yourself, it runs first and StreamSift tries the other methods in that same order. It stops at the first playable result. This is off by default. Escape cancels the entire search.</p>
 <p>On the General tab, turn search sounds on or off, or choose the playlist folder. The default is the <code>StreamSift</code> folder inside Music. The folder is created when you first open it from StreamSift or save a playlist there.</p>
-<p>In General, use <strong>Media player</strong> to choose where Return and double-click send a stream. Automatic uses the Mac default for <code>.m3u8</code> if set, otherwise it looks for VLC, then FastPlay. If a selected player is missing, StreamSift can use the Mac default instead. When a player needs a temporary playlist, it does not go into your saved playlist folder. Press F1 on the control for help.</p>
+<p>In General, use <strong>Media player</strong> to choose where Return and double-click send a result. Automatic uses the Mac default for <code>.m3u8</code> if set, otherwise it looks for VLC, then FastPlay. If a player you picked is missing, StreamSift tells you which player it could not find.</p>
+<p>Use <strong>Choose Player</strong> to select a Mac app that can open <code>.m3u8</code> playlists. Its name appears under Media player once you choose it. Select OK to use it only in StreamSift. The player receives a temporary playlist with the selected results in order. If you move the app, use Choose Player again. Press F1 on either control for help.</p>
 <p>On the Updates tab, Check for updates at startup is on by default unless you have saved a different choice. It checks GitHub for a newer version and shows a notice; it does not install anything automatically. Turn this setting off to check only when you ask.</p>
 <h2 id="keys">Keyboard shortcuts</h2>
 <dl>
-<dt>Command+1</dt><dd>Move to Website address or station name.</dd>
-<dt>Command+2</dt><dd>Move to Streams when results are available.</dd>
-<dt>Command+3</dt><dd>Move to Stream Details for the selected result.</dd>
-<dt>Shift+Return on Stream address in Stream Details</dt><dd>Scan the stream server.</dd>
-<dt>F4 in Streams or Stream Details</dt><dd>Review the current line in a read-only text field.</dd>
-<dt>Command+4</dt><dd>Move to Status, even when no streams were found.</dd>
-<dt>Return in the search field</dt><dd>Find streams and move to the results when ready.</dd>
-<dt>Command+Return</dt><dd>Find streams.</dd>
+<dt>Command+1</dt><dd>Move to Web address or station name.</dd>
+<dt>Command+2</dt><dd>Move to Results when results are available.</dd>
+<dt>Command+3</dt><dd>Move to Details for the selected result.</dd>
+<dt>Shift+Return on Stream address in Details</dt><dd>Scan the stream server.</dd>
+<dt>F4 in Results or Details</dt><dd>Review the current line in a read-only text field.</dd>
+<dt>Command+4</dt><dd>Move to Status, even when no results were found.</dd>
+<dt>Return in the search field</dt><dd>Find streams and files and move to Results when ready.</dd>
+<dt>Command+Return</dt><dd>Find streams and files.</dd>
 <dt>Escape</dt><dd>Cancel the current search or close a dialog.</dd>
-<dt>Return on one selected result</dt><dd>Play the stream without saving a playlist.</dd>
+<dt>Return on one selected result</dt><dd>Play the selected result or tracks without saving a playlist.</dd>
 <dt>Option+Return on one selected result</dt><dd>Open the stream address in the default browser.</dd>
 <dt>Command+L</dt><dd>Filter and sort the current results.</dd>
 <dt>Command+F</dt><dd>Find text in the visible results.</dd>
 <dt>Command+G / Command+Shift+G</dt><dd>Find the next or previous match. F3 and Shift+F3 also work when sent as function keys.</dd>
 <dt>Command+R</dt><dd>Refresh the last search and its reported listener counts.</dd>
 <dt>Right-click or VO+Shift+M on a result</dt><dd>Open the result's context menu.</dd>
-<dt>Command+A in Streams</dt><dd>Select all visible results.</dd>
-<dt>Command+C in Streams</dt><dd>Copy the selected stream addresses. In an edit field, Command+C copies selected text as usual.</dd>
-<dt>Command+S</dt><dd>Save the selected streams in one playlist.</dd>
+<dt>Command+A in Results</dt><dd>Select all visible results.</dd>
+<dt>Command+C in Results</dt><dd>Copy the selected addresses. In an edit field, Command+C copies selected text as usual.</dd>
+<dt>Command+S</dt><dd>Save the selected items in one playlist.</dd>
 <dt>Shift+Return on a result</dt><dd>Save a playlist and open it in the Mac default app for M3U8 files.</dd>
 <dt>Command+Shift+O</dt><dd>Open the playlist folder.</dd>
 <dt>Command+,</dt><dd>Open Settings.</dd>
 <dt>Command+N</dt><dd>Clear the search and return to the search field.</dd>
 <dt>Command+Shift+Return</dt><dd>Find with Browser.</dd>
-<dt>Command+Shift+D</dt><dd>Look Up in Public Directory.</dd>
-<dt>F1</dt><dd>Read help for the focused control or Stream Details row. In Review Text, F1 explains the text field or Close button. The help dialog also has an Open Manual button.</dd>
+<dt>Command+Shift+D</dt><dd>Look Up in Radio Directory.</dd>
+<dt>F1</dt><dd>Read help for the focused control or Details row. In Review Text, F1 explains the text field or Close button. The help dialog also has an Open Manual button.</dd>
 <dt>Shift+F1</dt><dd>Check for updates.</dd>
 <dt>Command+F1</dt><dd>Open the GitHub project.</dd>
 </dl>

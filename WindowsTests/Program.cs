@@ -63,6 +63,13 @@ File.WriteAllText(prefsFile, """{"SearchSounds":false,"AutomaticFallback":true,"
 Check(Preferences.Load(prefsFolder) is { SearchSounds: false, AutomaticFallback: true, MediaPlayer: PlayerChoice.Automatic },
     "An unknown player choice does not reset other preferences.");
 Check(Preferences.Load(prefsFolder).CheckUpdatesAtStartup, "Use the default when there is no stored update setting.");
+var savedPlayerPath = Path.Combine(directory, "Portable Player", "Player.exe");
+File.WriteAllText(prefsFile, JsonSerializer.Serialize(new { MediaPlayer = 4, CustomPlayerPath = savedPlayerPath }));
+Preferences.Load(prefsFolder).Save(prefsFolder);
+using (var saved = JsonDocument.Parse(File.ReadAllBytes(prefsFile)))
+    Check(saved.RootElement.GetProperty("MediaPlayer").GetInt32() == 4 &&
+        saved.RootElement.TryGetProperty("CustomPlayerPath", out var path) && path.GetString() == savedPlayerPath,
+        "A selected custom player survives saving even if the executable is currently unavailable.");
 var settings = new Preferences(true, true, exportFolder, AutomaticFallback: true, MediaPlayer: PlayerChoice.Vlc);
 settings.Save(prefsFolder);
 Check(Preferences.Load(prefsFolder) == settings && !Directory.Exists(exportFolder), "Saved preferences override the old marker without creating the export folder.");
@@ -138,10 +145,36 @@ Check(LastResults.Load(sessionFolder) == null && !Directory.Exists(sessionFolder
 var signedStream = station with { Url = new Uri("https://radio.example/live?token=fixture") };
 var hlsStream = station with { Url = new Uri("https://radio.example/opaque-session/playlist.m3u8"), Format = "HLS", IsHls = true };
 var videoStream = station with { Url = new Uri("https://radio.example/opaque-session/video.mp4"), Format = "MP4 video", IsVideo = true };
+var track = station with { Url = new Uri("https://radio.example/opaque-session/track.mp3"), IsTrack = true };
+var small = track with { Name = "Small", FileSizeBytes = 100, DateModified = new DateTime(2025, 1, 1) };
+var large = track with { Name = "Large", FileSizeBytes = 9_000_000_000, DateModified = new DateTime(2020, 1, 1) };
+Station[] tracks = [track, small, large];
+var newest = new ResultView(Order: ResultOrder.DateModifiedDescending);
+var largest = new ResultView(Order: ResultOrder.FileSizeDescending);
+Station[] mixedFileNames = new[] { "Zebra", "Alpha 10", "alpha 2", "baker" }
+    .Select(name => track with { Name = name }).ToArray();
+Check(new ResultView(Order: ResultOrder.NameAscending).Apply(mixedFileNames).Select(s => s.Name)
+    .SequenceEqual(["alpha 2", "Alpha 10", "baker", "Zebra"]),
+    "Filename sorting mixes uppercase and lowercase and puts 2 before 10.");
+Check(ResultView.ForSearch(fileIndex: true).Apply(mixedFileNames).Select(s => s.Name)
+        .SequenceEqual(["alpha 2", "Alpha 10", "baker", "Zebra"]) &&
+    ResultView.ForSearch(fileIndex: false).Apply(mixed).SequenceEqual(mixed) &&
+    new ResultView().RetainAvailable(mixedFileNames, fileIndex: true).Apply(mixedFileNames).SequenceEqual(mixedFileNames),
+    "Directories default to filename order, radio uses search order, and refresh preserves explicit Listed order.");
+Check(ResultView.AvailableOrders(tracks).SequenceEqual([ResultOrder.Search, ResultOrder.NameAscending, ResultOrder.NameDescending,
+        ResultOrder.DateModifiedDescending, ResultOrder.DateModifiedAscending, ResultOrder.FileSizeDescending, ResultOrder.FileSizeAscending]) &&
+    !ResultView.AvailableOrders(counted).Contains(ResultOrder.DateModifiedDescending) &&
+    !ResultView.AvailableOrders(tracks).Contains(ResultOrder.BitrateDescending) &&
+    largest.RetainAvailable([track]) == default && newest.RetainAvailable(tracks) == newest,
+    "Offer and retain directory sort orders only while metadata is available.");
+Check(newest.Apply(tracks).SequenceEqual([small, large, track]) && largest.Apply(tracks).SequenceEqual([large, small, track]) &&
+    new ResultView(Order: ResultOrder.DateModifiedAscending).Apply(tracks).SequenceEqual([large, small, track]) &&
+    new ResultView(Order: ResultOrder.FileSizeAscending).Apply(tracks).SequenceEqual([small, large, track]),
+    "Sort dates and large file sizes both ways, always putting unknown values last.");
 var unsafeSource = station with { FoundOn = new Uri("https://radio.example/list?token=fixture") };
 var unsafeAddress = station with { Url = new Uri("http://127.0.0.1/stream") };
 var snapshot = LastResults.Capture("radio.example:8000", SearchMethod.Passive,
-    [signedStream, hlsStream, videoStream, unsafeSource, unsafeAddress, station, quiet, quiet], refreshView, quiet.Url)!;
+    [signedStream, hlsStream, videoStream, track, unsafeSource, unsafeAddress, station, quiet, quiet], refreshView, quiet.Url)!;
 Check(snapshot is not null && snapshot.Stations.SequenceEqual([station, quiet]), "Keep reusable streams only; filter temporary and local URLs.");
 snapshot!.Save(sessionFolder);
 Check(LastResults.Load(sessionFolder) is { } restored && restored.Input == "radio.example:8000" &&
@@ -198,6 +231,21 @@ foreach (var exe in new[] { vlcPath, foobarPath, fastPlayPath, portableFoobar, o
     Directory.CreateDirectory(Path.GetDirectoryName(exe)!);
     File.WriteAllText(exe, "");
 }
+Directory.CreateDirectory(Path.GetDirectoryName(savedPlayerPath)!);
+File.WriteAllText(savedPlayerPath, "");
+var customPlayer = StreamPreview.FindPlayer(PlayerChoice.Custom, savedPlayerPath);
+Check(customPlayer is { NeedsPlaylist: true, ShellPlaylist: false } && customPlayer.Executable == savedPlayerPath &&
+    customPlayer.Name == "Player", "Custom playback targets the selected executable directly.");
+Reject(() => StreamPreview.Command(customPlayer!, station), "A generic custom player was given a raw URL.");
+var customCommand = StreamPreview.Command(customPlayer!, station, handoff);
+Check(customCommand.FileName == savedPlayerPath && !customCommand.UseShellExecute &&
+    customCommand.WorkingDirectory == Path.GetDirectoryName(savedPlayerPath) && customCommand.ArgumentList.SequenceEqual([handoff]),
+    "Custom players get a single playlist argument even when the executable path contains spaces.");
+File.Delete(savedPlayerPath);
+Check(StreamPreview.FindPlayer(PlayerChoice.Custom, savedPlayerPath) == null &&
+    StreamPreview.FindPlayer(PlayerChoice.Custom, "Player.exe") == null &&
+    StreamPreview.FindPlayer(PlayerChoice.Custom, Path.Combine(playerRoot, "StreamSift.exe")) == null,
+    "Unavailable or invalid custom players do not fall back to a different app.");
 Check(StreamPreview.ResolvePlayer(PlayerChoice.Automatic, portableFoobar, [playerRoot]) is { Executable: var preferred } &&
     preferred == portableFoobar, "Automatic prefers a supported default, including portable players.");
 Check(StreamPreview.ResolvePlayer(PlayerChoice.Automatic, otherPlayer, [playerRoot]) is { ShellPlaylist: true, NeedsPlaylist: true },
@@ -216,15 +264,23 @@ Reject(() => StreamPreview.Command(fastPlay, station), "FastPlay was given a raw
 Check(StreamPreview.Command(fastPlay, station, handoff).ArgumentList.SequenceEqual([handoff]),
     "FastPlay opens only the one-stream temporary playlist.");
 File.Delete(vlcPath);
-Check(StreamPreview.ResolvePlayer(PlayerChoice.Vlc, portableFoobar, [playerRoot])?.Executable == portableFoobar &&
-    StreamPreview.ResolvePlayer(PlayerChoice.Automatic, vlcPath, [playerRoot])?.Executable == foobarPath,
-    "A missing explicit player can use the registered default.");
+Check(StreamPreview.ResolvePlayer(PlayerChoice.Vlc, portableFoobar, [playerRoot]) == null &&
+    StreamPreview.ResolvePlayer(PlayerChoice.FastPlay, portableFoobar, []) == null,
+    "An unavailable preset never launches the registered default.");
+Check(StreamPreview.ResolvePlayer(PlayerChoice.Automatic, vlcPath, [playerRoot])?.Executable == foobarPath,
+    "Automatic still finds installed players when the association is unavailable.");
 var shellPlayer = StreamPreview.ResolvePlayer(PlayerChoice.Automatic, otherPlayer, [])!;
 Reject(() => StreamPreview.Command(shellPlayer, videoStream), "The system default was given a raw URL.");
 var shellCommand = StreamPreview.Command(shellPlayer, videoStream, handoff);
 Check(shellCommand.UseShellExecute && shellCommand.FileName == handoff && shellCommand.ArgumentList.Count == 0,
     "The default player receives only a temporary playlist, not an exported file or a browser URL.");
 var preview = StreamPreview.Command(new StreamPreview.Player(vlcPath, PlayerChoice.Vlc), station);
+var batchHandoff = FoobarHandoff.Stage(Path.Combine(directory, "batch-handoff"), largest.Apply(tracks));
+Check(File.ReadAllText(batchHandoff) == PlaylistFile.Text([large, small, track]) &&
+    StreamPreview.Command(new StreamPreview.Player(vlcPath, PlayerChoice.Vlc), track, batchHandoff)
+        .ArgumentList.SequenceEqual([batchHandoff]) &&
+    StreamPreview.Command(new StreamPreview.Player(foobarPath, PlayerChoice.Foobar2000), track, batchHandoff)
+        .ArgumentList.SequenceEqual(["/immediate", batchHandoff]), "Batch playback hands the ordered tracks to the chosen player.");
 Check(!preview.UseShellExecute && preview.ArgumentList.SequenceEqual([station.Url.AbsoluteUri]),
     "Preview sends exactly the raw stream argument to the player without creating a playlist.");
 var directFoobar = StreamPreview.Command(new StreamPreview.Player(foobarPath, PlayerChoice.Foobar2000), station);

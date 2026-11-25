@@ -9,8 +9,8 @@ import UniformTypeIdentifiers
                                         styleMask: [.titled, .closable, .miniaturizable, .resizable],
                                         backing: .buffered, defer: false)
     private let address = NSComboBox()
-    private let find = NSButton(title: "Find Streams", target: nil, action: nil)
-    private let findDirectory = NSButton(title: "Look Up in Public Directory", target: nil, action: nil)
+    private let find = NSButton(title: "Find Streams and Files", target: nil, action: nil)
+    private let findDirectory = NSButton(title: "Look Up in Radio Directory", target: nil, action: nil)
     private let cancel = NSButton(title: "Cancel", target: nil, action: nil)
     private let table = StreamTable()
     private let details = DetailTable()
@@ -26,6 +26,7 @@ import UniformTypeIdentifiers
     private var failureSound: NSSound?
     private var stations: [Station] = []
     private var allStations: [Station] = []
+    private var fileIndexResults = false
     private var resultView = ResultView()
     private var resultQuery = ""
     private var lastSearch: (input: String, mode: SearchMode)?
@@ -83,7 +84,7 @@ import UniformTypeIdentifiers
             self?.cancelSearch()
             return true
         }
-        let caption = NSTextField(labelWithString: "Website address or station name:")
+        let caption = NSTextField(labelWithString: "Web address or station name:")
         caption.setAccessibilityServesAsTitleForUIElements([address])
         address.isBezeled = true
         address.target = self
@@ -93,16 +94,16 @@ import UniformTypeIdentifiers
         address.completes = false
         refreshHistory()
         address.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        label("Website address or station name", for: address,
-              hint: "Enter a public website, stream address, station name or call sign, or choose a recent successful search from the list.")
+        label("Web address or station name", for: address,
+              hint: "Enter a public website, stream, file or folder address, station name or call sign, or choose a recent search.")
         find.target = self
         find.action = #selector(findStreams)
         findDirectory.target = self
         findDirectory.action = #selector(findInDirectory)
         cancel.target = self
         cancel.action = #selector(cancelSearch)
-        label("Find Streams", for: find, hint: "Search for live audio without starting a web player.")
-        label("Look Up in Public Directory", for: findDirectory,
+        label("Find Streams and Files", for: find, hint: "Search a public address for streams and files, or find a radio station by name or call sign.")
+        label("Look Up in Radio Directory", for: findDirectory,
               hint: "Look up a station name, call sign or website in public radio directories and verify matching streams.")
         label("Cancel", for: cancel, hint: "Stop the current search. You can also press Escape.")
         let entry = NSStackView(views: [caption, address])
@@ -110,14 +111,14 @@ import UniformTypeIdentifiers
         let searchButtons = NSStackView(views: [find, findDirectory, cancel])
         searchButtons.alignment = .centerY
 
-        label("Streams", for: table, hint: "Command+A selects all visible streams, and Command+S saves the selection in one playlist. Return plays one selected stream. F4 reviews the current line. Command+3 moves to Stream Details.")
+        label("Results", for: table, hint: "Command+A selects all visible results. Return plays one result or the selected tracks. F4 reviews the current line. Command+3 moves to Details.")
         table.usesAlternatingRowBackgroundColors = true
         table.allowsMultipleSelection = true
         table.allowsEmptySelection = false
         table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
-        let streamColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("Stream"))
+        let streamColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(FileResultColumn.name.rawValue))
         streamColumn.title = "Stream"
-        streamColumn.width = 630
+        streamColumn.width = FileResultColumn.name.width
         streamColumn.minWidth = 140
         streamColumn.resizingMask = [.autoresizingMask, .userResizingMask]
         table.addTableColumn(streamColumn)
@@ -131,14 +132,15 @@ import UniformTypeIdentifiers
         table.didSelectAll = { [weak self] in
             guard let self else { return }
             let count = table.selectedRowIndexes.count
-            setStatus(count == 1 ? "1 stream selected." : "\(count) streams selected.")
+            let kind = tracksSelected ? "track" : "stream"
+            setStatus("\(count) \(kind)\(count == 1 ? "" : "s") selected.")
         }
         table.actionMenu = { [weak self] in self?.resultMenu() }
         table.dataSource = self
         table.delegate = self
         details.configure()
-        label("Stream details", for: details,
-              hint: "F4 reviews the current line. Return searches the source or opens Save Stream Playlist on an HLS address. On Stream address, Shift+Return scans the server.")
+        label("Details", for: details,
+              hint: "F4 reviews the current line. Return searches the address or opens Save Playlist on an HLS address. On an address row, Shift+Return scans the server where available.")
         details.onCommand = { [weak self] command, row in self?.runDetailAction(command, row: row) }
         details.actionMenu = { [weak self] in self?.detailMenu() }
         let listView = scroll(table)
@@ -207,17 +209,17 @@ import UniformTypeIdentifiers
             NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         ])
         _ = section("Actions", [
-            item("Find Streams", #selector(findStreams), "\r"),
-            item("Look Up in Public Directory", #selector(findInDirectory), "d", modifiers: [.command, .shift]),
+            item("Find Streams and Files", #selector(findStreams), "\r"),
+            item("Look Up in Radio Directory", #selector(findInDirectory), "d", modifiers: [.command, .shift]),
             item("Find with Browser", #selector(findWithBrowser), "\r", modifiers: [.command, .shift]),
             item("Refresh Results", #selector(refreshResults), "r"), .separator(),
-            item("Copy Stream Addresses", #selector(copyAddress)),
-            item("Play Stream", #selector(previewStream)),
+            item("Copy Addresses", #selector(copyAddress)),
+            item("Play Result", #selector(previewStream)),
             item("Open in Browser", #selector(openFocusedAddressInBrowser), "\r", modifiers: .option),
             item("Save and Open in Default Player", #selector(openDefaultPlayer)), .separator(),
             item("Go to Address", #selector(focusAddress), "1"),
-            item("Go to Streams", #selector(focusStreams), "2"),
-            item("Go to Stream Details", #selector(focusDetails), "3"),
+            item("Go to Results", #selector(focusStreams), "2"),
+            item("Go to Details", #selector(focusDetails), "3"),
             item("Go to Status", #selector(focusStatus), "4"), .separator(),
             item("Filter and Sort...", #selector(showResultFilter), "l"),
             item("Find in Results...", #selector(showResultFind), "f"),
@@ -251,6 +253,11 @@ import UniformTypeIdentifiers
     @objc private func focusDetails() { if selected != nil { window.makeFirstResponder(details) } }
     @objc private func focusStatus() { window.makeFirstResponder(status) }
 
+    private var tracksSelected: Bool {
+        let selection = selectedStations
+        return !selection.isEmpty && selection.allSatisfy { $0.isTrack == true }
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(savePlaylist), #selector(copyAddress), #selector(openDefaultPlayer), #selector(focusDetails):
@@ -258,7 +265,12 @@ import UniformTypeIdentifiers
         case #selector(openFocusedAddressInBrowser):
             return (window.focusedView === details ? details.selectedDetail?.address != nil : table.selectedRowIndexes.count == 1) &&
                 window.isKeyWindow && window.attachedSheet == nil
-        case #selector(previewStream), #selector(openStreamInBrowser):
+        case #selector(previewStream):
+            let single = table.selectedRowIndexes.count == 1
+            let tracks = tracksSelected
+            menuItem.title = tracks ? (single ? "Play Track" : "Play Selected Tracks") : "Play Result"
+            return (single || tracks) && window.isKeyWindow && window.attachedSheet == nil
+        case #selector(openStreamInBrowser):
             return table.selectedRowIndexes.count == 1 && window.isKeyWindow && window.attachedSheet == nil
         case #selector(activateDetail):
             return details.canSearch && details.selectedDetail?.enterCommand != nil && window.attachedSheet == nil
@@ -307,14 +319,19 @@ import UniformTypeIdentifiers
 
     private func streamLine(at row: Int) -> String? {
         guard stations.indices.contains(row) else { return nil }
+        if fileIndexResults { return FileResultColumn.reviewLine(for: stations[row], named: names[row]) }
         return stations[row].listLabel(named: names[row])
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard let text = streamLine(at: row) else { return nil }
+        guard stations.indices.contains(row) else { return nil }
+        let column = tableColumn.flatMap { FileResultColumn(rawValue: $0.identifier.rawValue) }
+        let text = fileIndexResults ? (column ?? .name).value(for: stations[row], named: names[row])
+            : stations[row].listLabel(named: names[row])
         let cell = NSTextField(labelWithString: text)
         cell.lineBreakMode = .byTruncatingMiddle
         cell.toolTip = text
+        if fileIndexResults && column == .size { cell.alignment = .right }
         return cell
     }
 
@@ -360,15 +377,16 @@ import UniformTypeIdentifiers
             .save(to: defaults)
     }
 
-    private func load(_ found: [Station]) {
+    private func load(_ found: [Station], fileIndex: Bool = false) {
         allStations = found
-        resultView = ResultView()
+        fileIndexResults = fileIndex
+        resultView = ResultView.forSearch(fileIndex: fileIndex)
         resultQuery = ""
-        render(found, preserving: [])
+        render(resultView.apply(found), preserving: [])
     }
 
     private func render(_ found: [Station], preserving selection: Set<String>) {
-        guard stations != found else { refreshNavigation(); return }
+        guard stations != found || table.showsFileColumns != fileIndexResults else { refreshNavigation(); return }
         stations = found
         func group(_ row: Station) -> [String] { [row.name, row.format, String(row.bitrate ?? -1)] }
         let counts = Dictionary(grouping: found, by: group)
@@ -376,6 +394,7 @@ import UniformTypeIdentifiers
             guard counts[group(row), default: []].count > 1, let url = URL(string: row.url) else { return row.name }
             return "\(row.name) (\(url.host ?? "")\(url.path))"
         }
+        table.setFileColumns(fileIndexResults)
         table.reloadData()
         if !found.isEmpty {
             let kept = IndexSet(found.indices.filter { selection.contains(found[$0].url) })
@@ -392,21 +411,23 @@ import UniformTypeIdentifiers
         format.addItems(withTitles: ["All formats"] + formats)
         format.selectItem(at: resultView.format.flatMap { formats.firstIndex(of: $0) }.map { $0 + 1 } ?? 0)
         let sort = NSPopUpButton()
-        let orders = allStations.contains { $0.listeners != nil } ? ResultOrder.allCases :
-            ResultOrder.allCases.filter { $0 != .listenersDescending && $0 != .listenersAscending }
-        sort.addItems(withTitles: orders.map(\.label))
-        sort.selectItem(at: resultView.order.rawValue)
+        let tracks = allStations.contains { $0.isTrack == true }
+        let orders = ResultView.availableOrders(allStations)
+        sort.addItems(withTitles: orders.map { $0.label(tracks: tracks) })
+        sort.selectItem(at: orders.firstIndex(of: resultView.order) ?? 0)
         let sheet = ResultCommandSheet(title: "Filter and Sort", action: "Apply", fields: [
             ("Format", format, "Show all formats or a format found in the current search."),
-            ("Sort by", sort, "Choose search order, station name, bitrate or listeners where reported. Unknown counts and bitrates appear last.")
+            ("Sort by", sort, tracks ? "Choose listed order, track name, date modified or file size where listed. Missing values appear last."
+                : "Choose search order, station name, bitrate or listeners where reported. Unknown counts and bitrates appear last.")
         ], manual: { [weak self] in self?.openManual() })
         sheet.present(on: window) { [weak self] in
             guard let self else { return }
             let index = format.indexOfSelectedItem - 1
+            let sortIndex = sort.indexOfSelectedItem
             resultView = ResultView(format: formats.indices.contains(index) ? formats[index] : nil,
-                                    order: ResultOrder(rawValue: sort.indexOfSelectedItem) ?? .search)
+                                    order: orders.indices.contains(sortIndex) ? orders[sortIndex] : .search)
             render(resultView.apply(allStations), preserving: Set(selectedStations.map(\.url)))
-            setStatus("Showing \(stations.count) of \(allStations.count) streams.")
+            setStatus("Showing \(stations.count) of \(allStations.count) \(tracks ? "tracks" : "streams").")
             window.makeFirstResponder(table)
         }
     }
@@ -419,7 +440,7 @@ import UniformTypeIdentifiers
         guard !stations.isEmpty, window.attachedSheet == nil else { return }
         let input = NSTextField(string: resultQuery)
         let sheet = ResultCommandSheet(title: "Find in Results", action: "Find", fields: [
-            ("Find what", input, "Find text in the visible streams by name, format, bitrate, listeners or address.")
+            ("Find what", input, "Find visible results by name, format, address, bitrate or listener count where available.")
         ], manual: { [weak self] in self?.openManual() })
         sheet.present(on: window) { [weak self] in
             guard let self else { return }
@@ -509,21 +530,26 @@ import UniformTypeIdentifiers
         } else {
             switch result {
             case .success(let found):
-                let rememberable = found.entryWasWebsite == true ? found.stations.count : found.stations.filter { $0.isVideo != true }.count
+                let rememberable = found.entryWasWebsite == true ? found.stations.count :
+                    found.stations.filter { $0.isVideo != true && $0.isTrack != true }.count
                 if history.remember(input, verifiedStreams: rememberable, in: defaults) { refreshHistory() }
                 let previousFormat = resultView.format
                 if refreshing {
                     allStations = found.stations
-                    resultView = resultView.retainingAvailable(in: allStations)
+                    let sameResultType = fileIndexResults == (found.entryWasFileIndex == true)
+                    fileIndexResults = found.entryWasFileIndex == true
+                    resultView = sameResultType ? resultView.retainingAvailable(in: allStations, fileIndex: fileIndexResults)
+                        : ResultView.forSearch(fileIndex: fileIndexResults)
                     render(resultView.apply(allStations), preserving: Set(selectedStations.map(\.url)))
                 } else {
-                    load(found.stations)
+                    load(found.stations, fileIndex: found.entryWasFileIndex == true)
                 }
                 rememberLastResults()
                 let prefix = found.stations.isEmpty && (found.attempts ?? 0) > 1 ? "Automatic search: " : (found.method ?? mode).resultPrefix
                 message = (refreshing ? "Refresh finished. " : "") + prefix + found.summary
                 if refreshing, let format = resultView.format {
-                    message += " Showing \(stations.count) \(format) streams."
+                    let kind = found.entryWasFileIndex == true ? "tracks" : "streams"
+                    message += " Showing \(stations.count) \(format) \(kind)."
                 } else if refreshing, let previousFormat, !allStations.isEmpty {
                     message += " \(previousFormat) is no longer available. Showing all formats."
                 }
@@ -572,9 +598,9 @@ import UniformTypeIdentifiers
 
     private func resultMenu() -> NSMenu {
         let menu = NSMenu()
-        menu.addItem(item("Play Stream", #selector(previewStream), "\r", modifiers: []))
-        menu.addItem(item("Open Stream in Browser", #selector(openStreamInBrowser), "\r", modifiers: .option))
-        menu.addItem(item(table.selectedRowIndexes.count == 1 ? "Copy Stream Address" : "Copy Stream Addresses", #selector(copyAddress), "c"))
+        menu.addItem(item("Play Result", #selector(previewStream), "\r", modifiers: []))
+        menu.addItem(item("Open Address in Browser", #selector(openStreamInBrowser), "\r", modifiers: .option))
+        menu.addItem(item(table.selectedRowIndexes.count == 1 ? "Copy Address" : "Copy Addresses", #selector(copyAddress), "c"))
         menu.addItem(item("Review Text...", #selector(reviewStreamLine), functionFour, modifiers: []))
         menu.addItem(item("Save Playlist...", #selector(savePlaylist), "s"))
         menu.addItem(item("Save and Open in Default Player", #selector(openDefaultPlayer), "\r", modifiers: .shift))
@@ -657,7 +683,7 @@ import UniformTypeIdentifiers
         let selection = selectedStations
         guard !selection.isEmpty else { return }
         copyText(selection.map(\.url).joined(separator: "\n"),
-                 confirmation: selection.count == 1 ? "Stream address copied." : "\(selection.count) stream addresses copied.")
+                 confirmation: selection.count == 1 ? "Address copied." : "\(selection.count) addresses copied.")
     }
 
     private func copyText(_ text: String, confirmation: String) {
@@ -675,7 +701,7 @@ import UniformTypeIdentifiers
         do { try FileManager.default.createDirectory(at: preferences.folder, withIntermediateDirectories: true) }
         catch { showMessage("Could Not Open Playlist Folder", error.localizedDescription); return }
         let save = NSSavePanel()
-        save.title = "Save Stream Playlist"
+        save.title = "Save Playlist"
         save.directoryURL = preferences.folder
         save.allowedContentTypes = [UTType(filenameExtension: "m3u8") ?? .data]
         save.nameFieldStringValue = Playlist.stem(selection) + ".m3u8"
@@ -699,35 +725,44 @@ import UniformTypeIdentifiers
     }
 
     @objc private func previewStream() {
-        if table.selectedRowIndexes.count > 1 {
-            setStatus("Select one stream to play it, or press Shift+Return to save and open the selection.")
+        let selection = selectedStations
+        guard let first = selection.first, window.attachedSheet == nil else { return }
+        if selection.count > 1 && !selection.allSatisfy({ $0.isTrack == true }) {
+            setStatus("Select one result to play it, or press Shift+Return to save and open the selection.")
             return
         }
-        guard table.selectedRowIndexes.count == 1, let selected, window.attachedSheet == nil else { return }
-        guard let address = StreamPreview.address(selected) else {
-            showMessage("Could Not Play Stream", "The stream does not have a public HTTP or HTTPS address.")
+        guard let address = StreamPreview.address(first) else {
+            showMessage("Could Not Play Result", "The result does not have a public HTTP or HTTPS address.")
             return
         }
         let workspace = NSWorkspace.shared
         let associated = UTType(filenameExtension: "m3u8").flatMap { workspace.urlForApplication(toOpen: $0) }
-        guard let target = StreamPreview.target(choice: preferences.mediaPlayer, associated: associated,
+        guard let target = StreamPreview.target(choice: preferences.mediaPlayer, customPath: preferences.customPlayerPath, associated: associated,
             associatedIdentifier: associated.flatMap { Bundle(url: $0)?.bundleIdentifier },
             installed: { workspace.urlForApplication(withBundleIdentifier: $0) }) else {
-            showMessage("Play Stream", "No playlist player was found. Choose a media player in Settings or set a default app for .m3u8 files.")
+            let message: String
+            switch preferences.mediaPlayer {
+            case .automatic: message = "No playlist player was found. Use Choose Player in Settings or set a default app for .m3u8 files."
+            case .custom: message = "The custom player could not be found. Use Choose Player in Settings."
+            default: message = "StreamSift could not find \(preferences.mediaPlayer.title). Use Choose Player in Settings to locate it, or select Automatic."
+            }
+            showMessage("Play Result", message)
             return
         }
         let playback: URL
-        do { playback = try target.needsPlaylist ? PlaybackHandoff.stage(selected) : address }
-        catch { showMessage("Could Not Play Stream", error.localizedDescription); return }
+        let usesPlaylist = target.needsPlaylist || selection.count > 1
+        do { playback = try usesPlaylist ? PlaybackHandoff.stage(selection) : address }
+        catch { showMessage("Could Not Play Result", error.localizedDescription); return }
         // An explicit app target keeps an HTTP address out of the browser.
         workspace.open([playback], withApplicationAt: target.app, configuration: NSWorkspace.OpenConfiguration()) { [weak self] app, error in
             DispatchQueue.main.async {
                 if error != nil || app == nil {
-                    if target.needsPlaylist { try? FileManager.default.removeItem(at: playback) }
-                    self?.showMessage("Could Not Play Stream", "The player could not open the stream. Choose another player in Settings.")
+                    if usesPlaylist { try? FileManager.default.removeItem(at: playback) }
+                    self?.showMessage("Could Not Play Result", "The player could not open the selection. Choose another player in Settings.")
                 } else {
-                    self?.setStatus("Sent to \(target.player?.title ?? "your default playlist player").")
-                    if target.needsPlaylist {
+                    let player = target.player?.displayName(customPath: target.app.path) ?? "your default playlist player"
+                    self?.setStatus(selection.count == 1 ? "Sent to \(player)." : "Sent \(selection.count) tracks to \(player).")
+                    if usesPlaylist {
                         DispatchQueue.main.asyncAfter(deadline: .now() + PlaybackHandoff.retention + 1) {
                             _ = try? PlaybackHandoff.prune()
                         }
@@ -749,7 +784,7 @@ import UniformTypeIdentifiers
 
     private func openAddressInBrowser(_ address: URL) {
         guard NSWorkspace.shared.open(address) else {
-            showMessage("Could Not Open Stream", "The stream address could not be opened in your browser.")
+            showMessage("Could Not Open Address", "The address could not be opened in your browser.")
             return
         }
         setStatus("Opened in browser.")
@@ -768,7 +803,7 @@ import UniformTypeIdentifiers
     }
 
     private func reportSaved(_ file: URL, count: Int) {
-        setStatus("Playlist saved: \(file.lastPathComponent)" + (count > 1 ? ". \(count) streams." : ""))
+        setStatus("Playlist saved: \(file.lastPathComponent)" + (count > 1 ? ". \(count) items." : ""))
     }
 
     @objc private func showSettings() {
@@ -803,7 +838,8 @@ import UniformTypeIdentifiers
         if focus === details, let row = details.selectedDetail {
             help = (row.label + " Help", ContextGuide.detail(row, canSearch: details.canSearch))
         } else if focus === table {
-            help = ("Streams Help", ContextGuide.streams(selected: table.selectedRowIndexes.count))
+            help = ("Results Help", ContextGuide.streams(selected: table.selectedRowIndexes.count, tracks: tracksSelected,
+                                                        fileColumns: fileIndexResults))
         } else {
             let text = focus?.accessibilityHelp().flatMap { $0.isEmpty ? nil : $0 } ??
                 "Enter a website address and press Return. When streams are found, use the results table to copy or save a stream."

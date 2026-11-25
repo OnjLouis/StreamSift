@@ -119,7 +119,7 @@ public sealed class SearchSequence(HttpClient client, string? cacheDirectory = n
                 requests += result.Requests;
                 unavailable += result.Unreachable;
                 limitReached |= result.LimitReached;
-                if (result.Stations.Count != 0)
+                if (result.Stations.Count != 0 || result.EntryWasFileIndex)
                     return new SearchRun(result with { Requests = requests, Unreachable = unavailable, LimitReached = limitReached }, method, attempts, failed);
             }
             catch (Exception error) when (fallback && !cancel.IsCancellationRequested && error is

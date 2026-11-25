@@ -23,7 +23,8 @@ struct LastResults: Codable {
         var seen = Set<String>()
         var safe: [Station] = []
         for station in stations {
-            guard station.format != "HLS", station.isVideo != true, safeText(station.name, limit: 512), safeText(station.format, limit: 32),
+            guard station.format != "HLS", station.isVideo != true, station.isTrack != true,
+                  safeText(station.name, limit: 512), safeText(station.format, limit: 32),
                   stableAddress(station.url), stableAddress(station.foundOn), seen.insert(station.url).inserted else { continue }
             safe.append(station)
             if safe.count == maxStations { break }

@@ -6,20 +6,20 @@ namespace StreamSift;
 internal sealed class MainForm : Form
 {
     private readonly HttpClient client = PublicNetwork.CreateClient();
-    private readonly ComboBox url = new() { AccessibleName = "Website address or station name", Dock = DockStyle.Fill,
+    private readonly ComboBox url = new() { AccessibleName = "Web address or station name", Dock = DockStyle.Fill,
         DropDownStyle = ComboBoxStyle.DropDown, MaxLength = 4096, MaxDropDownItems = SearchHistory.Capacity };
-    private readonly ShortcutButton find = new() { Text = "Find streams", ShortcutText = "Ctrl+Enter", AutoSize = true, TabIndex = 1 };
-    private readonly ShortcutButton findDirectory = new() { Text = "Look up in public directory", ShortcutText = "Ctrl+Shift+D", AutoSize = true };
+    private readonly ShortcutButton find = new() { Text = "Find streams and files", ShortcutText = "Ctrl+Enter", AutoSize = true, TabIndex = 1 };
+    private readonly ShortcutButton findDirectory = new() { Text = "Look up in radio directory", ShortcutText = "Ctrl+Shift+D", AutoSize = true };
     private readonly ShortcutButton cancel = new() { Text = "Cancel", ShortcutText = "Esc", AutoSize = true, Enabled = false, TabIndex = 2 };
     private readonly StreamList results = new()
     {
-        AccessibleName = "Streams", View = View.Details, FullRowSelect = true, HideSelection = false,
+        AccessibleName = "Results", View = View.Details, FullRowSelect = true, HideSelection = false,
         Dock = DockStyle.Fill, TabIndex = 2
     };
     private readonly DetailList details = new() { Dock = DockStyle.Fill, TabIndex = 4 };
     private readonly TextBox status = new() { AccessibleName = "Status", ReadOnly = true, Dock = DockStyle.Fill, TabIndex = 6 };
-    private readonly Label streamsLabel = new() { Text = "&Streams:", AutoSize = true, Anchor = AnchorStyles.Left, TabIndex = 1 };
-    private readonly Label detailsLabel = new() { Text = "Stream &Details:", AutoSize = true, Anchor = AnchorStyles.Left, TabIndex = 3 };
+    private readonly Label streamsLabel = new() { Text = "Re&sults:", AutoSize = true, Anchor = AnchorStyles.Left, TabIndex = 1 };
+    private readonly Label detailsLabel = new() { Text = "&Details:", AutoSize = true, Anchor = AnchorStyles.Left, TabIndex = 3 };
     private readonly Label statusLabel = new() { Text = "Stat&us:", AutoSize = true, Anchor = AnchorStyles.Left, TabIndex = 5 };
     private readonly Dictionary<Control, string> help = new();
     private readonly ToolStripMenuItem copyCommand, saveCommand, openFolderCommand, foobarCommand, openPlayerCommand, previewCommand, preferencesCommand, updateCommand;
@@ -32,6 +32,7 @@ internal sealed class MainForm : Form
     private string[] history;
     private readonly bool restoreLastResults;
     private Station[] searchResults = [], visibleResults = [];
+    private bool fileIndexResults;
     private ResultView resultView;
     private string resultQuery = "";
     private (string Input, SearchMethod Method)? lastSearch;
@@ -69,16 +70,16 @@ internal sealed class MainForm : Form
         var actions = new ToolStripMenuItem("&Actions");
         browserCommand = MenuCommand.Create("Find with browser", () => _ = FindAsync(SearchMethod.Browser),
             Keys.Control | Keys.Shift | Keys.Enter);
-        directoryCommand = MenuCommand.Create("Look up in public directory", () => _ = FindAsync(SearchMethod.Directory),
+        directoryCommand = MenuCommand.Create("Look up in radio directory", () => _ = FindAsync(SearchMethod.Directory),
             Keys.Control | Keys.Shift | Keys.D);
         refreshCommand = MenuCommand.Create("Refresh results", RefreshResults, Keys.F5);
-        copyCommand = MenuCommand.Create("Copy stream address", Copy, display: "Ctrl+C");
+        copyCommand = MenuCommand.Create("Copy address", Copy, display: "Ctrl+C");
         foobarCommand = MenuCommand.Create("Add to Foobar2000", AddToFoobar, Keys.Control | Keys.Shift | Keys.F);
         previewCommand = MenuCommand.Create(StreamList.PlayLabel, Preview, display: "Enter");
         openBrowserCommand = MenuCommand.Create(StreamList.BrowserLabel, OpenInBrowser, display: "Alt+Enter");
         openPlayerCommand = MenuCommand.Create("Save and open in default player", OpenInDefaultPlayer, display: "Shift+Enter");
-        streamsCommand = MenuCommand.Create("Go to Streams", results.Select, Keys.Alt | Keys.S);
-        detailsCommand = MenuCommand.Create("Go to Stream Details", details.Select, Keys.Alt | Keys.D);
+        streamsCommand = MenuCommand.Create("Go to Results", results.Select, Keys.Alt | Keys.S);
+        detailsCommand = MenuCommand.Create("Go to Details", details.Select, Keys.Alt | Keys.D);
         statusCommand = MenuCommand.Create("Go to Status", status.Select, Keys.Alt | Keys.U);
         filterCommand = MenuCommand.Create("Filter and sort...", ShowResultFilter, Keys.Control | Keys.L);
         findResultCommand = MenuCommand.Create("Find in results...", () => ShowResultFind(), Keys.Control | Keys.F);
@@ -112,7 +113,7 @@ internal sealed class MainForm : Form
         entry.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         entry.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         entry.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        var urlLabel = new Label { Text = "&Website address or station name:", Anchor = AnchorStyles.Left, AutoSize = true, TabIndex = 0 };
+        var urlLabel = new Label { Text = "&Web address or station name:", Anchor = AnchorStyles.Left, AutoSize = true, TabIndex = 0 };
         url.TabIndex = 1;
         find.TabIndex = 0;
         findDirectory.TabIndex = 1;
@@ -124,7 +125,6 @@ internal sealed class MainForm : Form
         entry.Controls.Add(buttons, 0, 1);
         entry.SetColumnSpan(buttons, 2);
 
-        results.Columns.Add("Stream", 560);
         results.SelectedIndexChanged += (_, _) => UpdateSelection();
         results.Command += command =>
         {
@@ -140,8 +140,6 @@ internal sealed class MainForm : Form
                 case StreamAction.Review when results.CurrentLine is string line: ReviewLine(results, line); break;
             }
         };
-        results.Resize += (_, _) => results.Columns[0].Width =
-            Math.Max(145, results.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 4);
         details.Command += RunDetailAction;
 
         var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7, Padding = new(12) };
@@ -162,13 +160,13 @@ internal sealed class MainForm : Form
         Controls.Add(grid);
         Controls.Add(menus);
 
-        help[url] = "Enter a public website, stream address, station name or call sign. Alt+Down Arrow opens recent successful searches. Select an entry, then press Enter in the field to find streams.";
-        help[find] = "Scan an address for live audio, or find a station by name using recent websites and public radio directories.";
+        help[url] = "Enter a public website, stream, file or folder address, station name or call sign. Alt+Down Arrow opens recent successful searches. Select an entry and press Enter to search.";
+        help[find] = "Search a public address for streams and files, or find a radio station by name or call sign.";
         help[findDirectory] = "Look up a station name, call sign or website in public radio directories and verify matching streams.";
         help[cancel] = "Stop the current search. You can also press Escape.";
         help[results] = ContextGuide.Streams(0);
-        help[details] = "Select a row in Stream Details to read its available commands.";
-        help[status] = "Review the last result or operation. A search with no results does not prove that the website has no live stream.";
+        help[details] = "Select a row in Details to read its available commands.";
+        help[status] = "Read the latest search or playback result, including unavailable addresses and search limits.";
         find.Click += async (_, _) => await FindAsync();
         findDirectory.Click += async (_, _) => await FindAsync(SearchMethod.Directory);
         cancel.Click += (_, _) => scan?.Cancel();
@@ -211,6 +209,7 @@ internal sealed class MainForm : Form
         lastSearch = (saved.Input, saved.Method);
         url.Text = saved.Input;
         searchResults = saved.Stations;
+        fileIndexResults = false;
         resultView = saved.View;
         RenderResults(preserveSelection: false, restoredSelection: saved.Selection);
         SetStatus($"Restored {visibleResults.Length} {(visibleResults.Length == 1 ? "stream" : "streams")} from a saved search. Press F5 to refresh.");
@@ -228,7 +227,9 @@ internal sealed class MainForm : Form
     private void SelectAllStreams()
     {
         results.SelectAllRows();
-        SetStatus(results.SelectedItems.Count == 1 ? "1 stream selected." : $"{results.SelectedItems.Count} streams selected.");
+        var count = results.SelectedItems.Count;
+        var kind = results.TracksSelected ? "track" : "stream";
+        SetStatus($"{count} {kind}{(count == 1 ? "" : "s")} selected.");
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
@@ -254,7 +255,7 @@ internal sealed class MainForm : Form
     {
         SearchMethod.Browser => "Searching with a temporary browser...",
         SearchMethod.Directory => "Checking public radio directories...",
-        _ => "Searching the website..."
+        _ => "Checking the address..."
     };
 
     private void RefreshResults()
@@ -323,7 +324,7 @@ internal sealed class MainForm : Form
             operation.Token.ThrowIfCancellationRequested();
             var found = run.Result;
             var recent = SearchHistory.Remember(history, searchText,
-                found.EntryWasWebsite ? found.Stations.Count : found.Stations.Count(s => !s.IsVideo));
+                found.EntryWasWebsite ? found.Stations.Count : found.Stations.Count(s => !s.IsVideo && !s.IsTrack));
             if (!ReferenceEquals(recent, history))
             {
                 history = recent;
@@ -332,26 +333,40 @@ internal sealed class MainForm : Form
                 RefreshHistory();
             }
             searchResults = found.Stations.ToArray();
+            bool sameResultType = fileIndexResults == found.EntryWasFileIndex;
+            fileIndexResults = found.EntryWasFileIndex;
             var previousFormat = resultView.Format;
-            if (refreshing) resultView = resultView.RetainAvailable(searchResults);
+            resultView = refreshing && sameResultType ? resultView.RetainAvailable(searchResults, fileIndexResults)
+                : ResultView.ForSearch(fileIndexResults);
             RenderResults(preserveSelection: refreshing);
             RememberLastResults();
             focusResults = visibleResults.Length != 0;
             var sourceLabel = found.Stations.Count == 0 && run.Attempts > 1 ? "Automatic search: " : run.Method switch
             {
                 SearchMethod.Browser => "Browser-assisted search: ",
-                SearchMethod.Directory => "Public directory: ",
+                SearchMethod.Directory => "Radio directory: ",
                 _ => ""
             };
             var refreshed = refreshing ? "Refresh finished. " : "";
-            SetStatus(refreshed + sourceLabel + (found.Stations.Count switch
-                { 0 => "No live streams verified.", 1 => "1 stream found.", _ => $"{found.Stations.Count} streams found." }) +
+            var summary = found.Stations switch
+            {
+                [] when found.EntryWasFileIndex => "No supported audio files listed.",
+                [] => "No playable streams or files found.",
+                [{ IsTrack: true }] => found.EntryWasFileIndex ? "1 track listed." : "1 track found.",
+                [{ IsVideo: true }] => "1 video found.",
+                [_] => "1 stream found.",
+                _ when found.EntryWasFileIndex => $"{found.Stations.Count} tracks listed.",
+                _ when found.Stations.Any(s => s.IsVideo) => $"{found.Stations.Count} results found.",
+                _ => $"{found.Stations.Count} streams found."
+            };
+            SetStatus(refreshed + sourceLabel + summary +
                 $" Checked {found.Requests} {(found.Requests == 1 ? "address" : "addresses")}." +
                 (found.Unreachable > 0 ? $" {found.Unreachable} unavailable." : "") +
                 (found.LimitReached ? " Search limit reached." : "") +
                 (run.Attempts > 1 ? $" Tried {run.Attempts} methods." : "") +
                 (run.FailedMethods > 0 ? $" Methods that could not finish: {run.FailedMethods}." : "") +
-                (refreshing && resultView.Format != null ? $" Showing {visibleResults.Length} {resultView.Format} streams." : "") +
+                (refreshing && resultView.Format != null
+                    ? $" Showing {visibleResults.Length} {resultView.Format} {(found.EntryWasFileIndex ? "tracks" : "streams")}." : "") +
                 (refreshing && previousFormat != null && resultView.Format == null && found.Stations.Count != 0
                     ? $" {previousFormat} is no longer available. Showing all formats." : "") +
                 (historyNotSaved ? " Recent searches could not be saved." : ""));
@@ -369,8 +384,8 @@ internal sealed class MainForm : Form
                 SetStatus(refreshing && focusResults ? "Refresh could not finish. Previous results kept." : mode switch
                 {
                     SearchMethod.Browser => "Browser-assisted search could not finish.",
-                    SearchMethod.Directory => "Public directory lookup could not finish.",
-                    _ => "Search could not finish. Try the station's player page."
+                    SearchMethod.Directory => "Radio directory lookup could not finish.",
+                    _ => "Search could not finish. Check the address or try again."
                 });
                 if (!operation.IsCancellationRequested) sounds.SearchCompleted(0);
             }
@@ -564,15 +579,19 @@ internal sealed class MainForm : Form
             ? $"{s.Name} ({s.Url.IdnHost}{s.Url.AbsolutePath})" : s.Name).ToArray();
     }
 
-    private static ListViewItem ResultRow(Station station, string name) =>
-        new(name + ", " + station.Format + (station.Bitrate is int bitrate ? $", {bitrate} kbps" : "") +
-            (station.Listeners is int count ? ", " + ResultView.ListenerLabel(count) : ""))
-        { Tag = station };
+    private static ListViewItem ResultRow(Station station, string name, bool fileColumns = false)
+    {
+        if (fileColumns)
+            return new FileResultItem(station, name);
+        return new ListViewItem(name + (station.IsTrack ? ", Track, " : ", ") + station.Format +
+            (station.Bitrate is int bitrate ? $", {bitrate} kbps" : "") +
+            (station.Listeners is int count ? ", " + ResultView.ListenerLabel(count) : "")) { Tag = station };
+    }
 
     private void RenderResults(bool preserveSelection, Uri? restoredSelection = null)
     {
         var next = resultView.Apply(searchResults);
-        if (!visibleResults.SequenceEqual(next))
+        if (results.ShowsFileColumns != fileIndexResults || !visibleResults.SequenceEqual(next))
         {
             HashSet<Uri> selected = preserveSelection ? SelectedStreams().Select(s => s.Url).ToHashSet() :
                 restoredSelection != null ? [restoredSelection] : [];
@@ -583,9 +602,10 @@ internal sealed class MainForm : Form
             try
             {
                 results.Items.Clear();
+                results.SetFileColumns(fileIndexResults);
                 for (int i = 0; i < next.Length; i++)
                 {
-                    var row = results.Items.Add(ResultRow(next[i], names[i]));
+                    var row = results.Items.Add(ResultRow(next[i], names[i], fileIndexResults));
                     row.Selected = selected.Contains(next[i].Url);
                     if (row.Selected && next[i].Url == focused) row.Focused = true;
                 }
@@ -604,12 +624,12 @@ internal sealed class MainForm : Form
     private void ShowResultFilter()
     {
         if (searchResults.Length == 0) return;
-        using var dialog = ResultDialog.Filter(ResultView.Formats(searchResults), searchResults.Any(s => s.Listeners.HasValue),
-            resultView, OpenManual, out var read);
+        using var dialog = ResultDialog.Filter(searchResults, resultView, OpenManual, out var read);
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         resultView = read();
         RenderResults(preserveSelection: true);
-        SetStatus($"Showing {visibleResults.Length} of {searchResults.Length} streams.");
+        var kind = searchResults[0].IsTrack ? "tracks" : "streams";
+        SetStatus($"Showing {visibleResults.Length} of {searchResults.Length} {kind}.");
         results.Select();
     }
 
@@ -628,14 +648,14 @@ internal sealed class MainForm : Form
         if (resultQuery.Length == 0) { ShowResultFind(backwards); return; }
         int anchor = fromStart ? -1 : results.FocusedItem?.Index ?? -1;
         int index = ResultView.Find(visibleResults, anchor, resultQuery, backwards);
-        if (index < 0) { SetStatus("No match in the visible streams."); return; }
+        if (index < 0) { SetStatus("No match in the visible results."); return; }
         var row = results.Items[index];
         if (results.SelectedItems.Count != 1 || !row.Selected) results.SelectedIndices.Clear();
         row.Selected = true;
         row.Focused = true;
         row.EnsureVisible();
         results.Select();
-        if (index == anchor) SetStatus("Only one match in the visible streams.");
+        if (index == anchor) SetStatus("Only one match in the visible results.");
     }
 
     private void UpdateSelection()
@@ -648,8 +668,11 @@ internal sealed class MainForm : Form
         filterCommand.Enabled = scan == null && searchResults.Length != 0;
         findResultCommand.Enabled = nextResultCommand.Enabled = previousResultCommand.Enabled = scan == null && visibleResults.Length != 0;
         copyCommand.Enabled = foobarCommand.Enabled = saveCommand.Enabled = openPlayerCommand.Enabled = selected != null;
-        previewCommand.Enabled = openBrowserCommand.Enabled = count == 1;
-        copyCommand.Text = count > 1 ? "Copy stream addresses" : "Copy stream address";
+        var tracks = results.TracksSelected;
+        openBrowserCommand.Enabled = count == 1;
+        previewCommand.Enabled = count == 1 || tracks;
+        previewCommand.Text = tracks ? count == 1 ? "Play track" : "Play selected tracks" : StreamList.PlayLabel;
+        copyCommand.Text = count > 1 ? "Copy addresses" : "Copy address";
         details.CanSearch = scan == null && updateCheck == null;
         details.ShowRows(DetailRow.Rows(selected, count));
     }
@@ -686,9 +709,11 @@ internal sealed class MainForm : Form
     private void ClearResults()
     {
         searchResults = visibleResults = [];
+        fileIndexResults = false;
         resultView = default;
         resultQuery = "";
         results.Items.Clear();
+        results.SetFileColumns(false);
         UpdateSelection();
     }
 
@@ -736,7 +761,7 @@ internal sealed class MainForm : Form
         SafeAction(() =>
         {
             Clipboard.SetText(string.Join("\r\n", stations.Select(station => station.Url.AbsoluteUri)));
-            SetStatus(stations.Length == 1 ? "Stream address copied." : $"{stations.Length} stream addresses copied.");
+            SetStatus(stations.Length == 1 ? "Address copied." : $"{stations.Length} addresses copied.");
         });
     }
 
@@ -750,7 +775,7 @@ internal sealed class MainForm : Form
             Directory.CreateDirectory(preferences.ExportFolder);
             using var dialog = new SaveFileDialog
             {
-                Title = "Save stream playlist", Filter = "M3U playlist (*.m3u8)|*.m3u8",
+                Title = "Save playlist", Filter = "M3U playlist (*.m3u8)|*.m3u8",
                 AddExtension = true, DefaultExt = "m3u8", InitialDirectory = preferences.ExportFolder,
                 FileName = PlaylistFile.SuggestedName(stations)
             };
@@ -769,24 +794,31 @@ internal sealed class MainForm : Form
 
     private void Preview()
     {
-        if (results.SelectedItems.Count > 1)
+        var selection = SelectedStreams();
+        if (selection.Length == 0) return;
+        if (selection.Length > 1 && !results.TracksSelected)
         {
-            SetStatus("Select one stream to play it, or press Shift+Enter to save and open the selection.");
+            SetStatus("Select one result to play it, or press Shift+Enter to save and open the selection.");
             return;
         }
-        if (Selected is not Station item) return;
-        var player = StreamPreview.FindPlayer(preferences.MediaPlayer);
+        var player = StreamPreview.FindPlayer(preferences.MediaPlayer, preferences.CustomPlayerPath);
         if (player == null)
         {
-            ShowText(StreamList.PlayLabel, "No playlist player was found. Choose a media player in Preferences or set a default app for .m3u8 files.");
+            var message = preferences.MediaPlayer switch
+            {
+                PlayerChoice.Automatic => "No playlist player was found. Use Choose Player in Preferences or set a default app for .m3u8 files.",
+                PlayerChoice.Custom => "The custom player could not be found. Use Choose Player in Preferences.",
+                var choice => $"StreamSift could not find {StreamPreview.DisplayName(choice)}. Use Choose Player in Preferences to locate it, or select Automatic."
+            };
+            ShowText(StreamList.PlayLabel, message);
             return;
         }
         SafeAction(() =>
         {
-            var playlist = player.NeedsPlaylist ? FoobarHandoff.Stage(FoobarHandoff.Folder, [item]) : null;
+            var playlist = player.NeedsPlaylist || selection.Length > 1 ? FoobarHandoff.Stage(FoobarHandoff.Folder, selection) : null;
             try
             {
-                using var process = Process.Start(StreamPreview.Command(player, item, playlist));
+                using var process = Process.Start(StreamPreview.Command(player, selection[0], playlist));
                 if (process == null && !player.ShellPlaylist) throw new IOException(player.Name + " could not start.");
             }
             catch
@@ -795,7 +827,7 @@ internal sealed class MainForm : Form
                 throw;
             }
             if (playlist != null) handoffs.Start();
-            SetStatus("Sent to " + player.Name + ".");
+            SetStatus(selection.Length == 1 ? "Sent to " + player.Name + "." : $"Sent {selection.Length} tracks to {player.Name}.");
         });
     }
 
@@ -834,7 +866,7 @@ internal sealed class MainForm : Form
     }
 
     private void ReportSavedPlaylist(string path, int count) =>
-        SetStatus("Playlist saved: " + Path.GetFileName(path) + (count > 1 ? $". {count} streams." : ""));
+        SetStatus("Playlist saved: " + Path.GetFileName(path) + (count > 1 ? $". {count} items." : ""));
 
     private void AddToFoobar()
     {
@@ -845,7 +877,7 @@ internal sealed class MainForm : Form
             .FirstOrDefault(File.Exists);
         if (executable == null)
         {
-            ShowText("Foobar2000", "Foobar2000 was not found in Program Files. Copy the stream address or save the playlist to open it in your player.");
+            ShowText("Foobar2000", "Foobar2000 was not found in Program Files. Copy the address or save the playlist to open it in your player.");
             return;
         }
         SafeAction(() =>
@@ -877,7 +909,7 @@ internal sealed class MainForm : Form
         var focused = help.Keys.FirstOrDefault(c => c.ContainsFocus);
         var (title, text) = focused == details && details.SelectedDetail is DetailRow row
             ? (row.Label + " help", ContextGuide.Detail(row, details.CanSearch))
-            : focused == results ? ("Streams help", ContextGuide.Streams(results.SelectedItems.Count))
+            : focused == results ? ("Results help", ContextGuide.Streams(results.SelectedItems.Count, results.TracksSelected, fileIndexResults))
             : ("Context help", focused == null ? help[url] : help[focused]);
         using var dialog = new TextDialog(title, text, OpenManual);
         dialog.ShowDialog(this);
@@ -938,11 +970,11 @@ internal sealed class MainForm : Form
             url.TabIndex < buttons.TabIndex && find.TabIndex < findDirectory.TabIndex && findDirectory.TabIndex < cancel.TabIndex &&
             page.TabIndex < results.TabIndex && results.TabIndex < details.TabIndex && details.TabIndex < status.TabIndex &&
             results.Parent == panel && details.Parent == panel && !details.MultiSelect && status.ReadOnly &&
-            results.AccessibilityObject.Name == "Streams" && url.AccessibilityObject.Name == "Website address or station name" &&
+            results.AccessibilityObject.Name == "Results" && url.AccessibilityObject.Name == "Web address or station name" &&
             url.DropDownStyle == ComboBoxStyle.DropDown && url.MaxDropDownItems == SearchHistory.Capacity &&
             !clearHistoryCommand.Enabled && url.Items.Count == 0 &&
             find.AccessibilityObject.KeyboardShortcut == "Ctrl+Enter" && cancel.AccessibilityObject.KeyboardShortcut == "Esc" &&
-            findDirectory.AccessibilityObject.Name == "Look up in public directory" && findDirectory.AccessibilityObject.KeyboardShortcut == "Ctrl+Shift+D" &&
+            findDirectory.AccessibilityObject.Name == "Look up in radio directory" && findDirectory.AccessibilityObject.KeyboardShortcut == "Ctrl+Shift+D" &&
             IsSearchKey(Keys.Enter, true) && !IsSearchKey(Keys.Enter, false) &&
             IsSearchKey(Keys.Control | Keys.Enter, false) && StreamList.PreviewsStream(Keys.Enter) && !StreamList.OpensMenu(Keys.Enter) &&
             StreamList.OpensMenu(Keys.Apps) && StreamList.OpensMenu(Keys.Shift | Keys.F10) &&
@@ -962,19 +994,31 @@ internal sealed class MainForm : Form
             openFolderCommand.Enabled && openFolderCommand.ShortcutKeys == (Keys.Control | Keys.Shift | Keys.O) &&
             foobarCommand.ShortcutKeys == (Keys.Control | Keys.Shift | Keys.F) &&
             StreamList.OpensDefaultPlayer(Keys.Shift | Keys.Enter) && !StreamList.OpensMenu(Keys.Shift | Keys.Enter) &&
-            !StreamList.PreviewsStream(Keys.Shift | Keys.Enter) && previewCommand.Text == "Play stream" &&
+            !StreamList.PreviewsStream(Keys.Shift | Keys.Enter) && previewCommand.Text == "Play result" &&
             previewCommand.ShortcutKeyDisplayString == "Enter";
         using var preferencesFixture = new PreferencesDialog(new Preferences(MediaPlayer: PlayerChoice.Foobar2000), () => { });
         ok &= preferencesFixture.CheckControls();
-        using var filterFixture = ResultDialog.Filter(["AAC", "MP3"], true, new ResultView("MP3"), () => { }, out var readFilter);
+        using var customPreferences = new PreferencesDialog(new Preferences(MediaPlayer: PlayerChoice.Custom,
+            CustomPlayerPath: Path.Combine(AppContext.BaseDirectory, "Portable Player", "Player.exe")), () => { });
+        ok &= customPreferences.CheckControls();
+        var origin = new Uri("https://example.com/");
+        var radioFilter = new Station("Filter fixture", origin, "MP3", 192, origin, false);
+        using var filterFixture = ResultDialog.Filter([radioFilter, radioFilter with { Format = "AAC", Listeners = 0 }],
+            new ResultView("MP3"), () => { }, out var readFilter);
         var filterFields = filterFixture.Controls[0].Controls.OfType<ComboBox>().ToArray();
         ok &= filterFields.Length == 2 && filterFields[0].AccessibilityObject.Name == "Format" &&
             filterFields[0].Items.Cast<string>().SequenceEqual(["All formats", "AAC", "MP3"]) &&
             filterFields[1].AccessibilityObject.Name == "Sort by" && filterFields[1].Items.Contains("Listeners, most first") &&
             readFilter() == new ResultView("MP3") && filterFixture.AcceptButton is Button { Text: "&Apply" } &&
             filterFixture.CancelButton is Button { Text: "&Cancel" };
-        using var uncounted = ResultDialog.Filter(["MP3"], false, default, () => { }, out _);
+        using var uncounted = ResultDialog.Filter([radioFilter], default, () => { }, out _);
         ok &= !uncounted.Controls[0].Controls.OfType<ComboBox>().Last().Items.Contains("Listeners, most first");
+        var dated = radioFilter with { IsTrack = true, DateModified = new DateTime(2020, 1, 1), FileSizeBytes = 100 };
+        using var trackFilter = ResultDialog.Filter([dated], new ResultView(Order: ResultOrder.FileSizeAscending), () => { }, out var readTrackFilter);
+        var trackSort = trackFilter.Controls[0].Controls.OfType<ComboBox>().Last();
+        ok &= trackSort.Items.Cast<string>().SequenceEqual(["Listed order", "Track name, A to Z", "Track name, Z to A",
+            "Date modified, newest first", "Date modified, oldest first", "File size, largest first", "File size, smallest first"]) &&
+            readTrackFilter().Order == ResultOrder.FileSizeAscending;
         using var findFixture = ResultDialog.Find("", () => { }, out var readFind);
         var findField = findFixture.Controls[0].Controls.OfType<TextBox>().Single();
         ok &= findField.AccessibilityObject.Name == "Find what" && !((Button)findFixture.AcceptButton!).Enabled;
@@ -997,6 +1041,12 @@ internal sealed class MainForm : Form
         var b = a with { Url = new Uri(pageUrl, "themestream") };
         ok &= DisplayNames([a, b]) is ["Theme (example.com/fallback)", "Theme (example.com/themestream)"] &&
             DisplayNames([a]) is ["Theme"];
+        var track = a with { IsTrack = true, Bitrate = null };
+        ok &= ResultRow(track, track.Name).Text == "Theme, Track, MP3" &&
+            DetailRow.Rows(track, 1)[0].Label == "Track address" &&
+            StreamList.MenuItems(false, tracks: true).Any(item => item.Enabled && item.Id == (int)StreamAction.Preview &&
+                item.Caption == "&Play selected tracks\tEnter") &&
+            !StreamList.MenuItems(false).Any(item => item.Enabled && item.Id == (int)StreamAction.Preview);
         ok &= !results.TabStop && !details.TabStop && status.TabStop && !streamsCommand.Enabled && !detailsCommand.Enabled;
         statusCommand.PerformClick();
         ok &= statusCommand.Enabled && ActiveControl == status && panel.GetNextControl(statusLabel, true) == status;
@@ -1027,7 +1077,7 @@ internal sealed class MainForm : Form
         secondRow.Selected = true;
         SelectAllStreams();
         ok &= results.SelectedItems.Count == 2 && SelectedStreams().SequenceEqual([a, b]) &&
-            saveCommand.Enabled && !previewCommand.Enabled && copyCommand.Text == "Copy stream addresses" &&
+            saveCommand.Enabled && !previewCommand.Enabled && copyCommand.Text == "Copy addresses" &&
             details.Items.Cast<ListViewItem>().Any(item => item.Text == "Selection: Details for the first of 2 streams");
         secondRow.Focused = true;
         ok &= results.CurrentLine == secondRow.Text;
@@ -1077,7 +1127,7 @@ internal sealed class MainForm : Form
                 lines.Any(line => line.StartsWith("Enter:", StringComparison.Ordinal)) == (item.EnterAction != null) &&
                 lines.Any(line => line.StartsWith("Shift+Enter:", StringComparison.Ordinal)) == (item.Kind == DetailKind.StreamAddress) &&
                 lines.Contains("F4: Review the full line.");
-        }) && ContextGuide.Detail(direct[0], true).Contains("Enter: Open Save Stream Playlist") &&
+        }) && ContextGuide.Detail(direct[0], true).Contains("Enter: Open Save Playlist") &&
             ContextGuide.Detail(direct[1], true).Contains("Enter: Scan the server root") &&
             ContextGuide.Detail(rows[1], true).Contains("Enter: Search the source page.") &&
             !ContextGuide.Detail(direct[0], false).Contains("\r\nEnter:") &&
@@ -1114,9 +1164,31 @@ internal sealed class MainForm : Form
             url.Items.Cast<string>().SequenceEqual(["second.example", "first.example"]);
         ResetSearch();
         ok &= url.Text == "" && url.Items.Count == 2;
+        var directoryTrack = track with { FileSizeLabel = "631 KiB", DateModified = new DateTime(2019, 12, 5, 13, 38, 0) };
+        var unreportedTrack = track with { Name = "Another track", Url = b.Url };
+        fileIndexResults = true;
+        searchResults = [directoryTrack, unreportedTrack];
+        RenderResults(preserveSelection: false);
+        if (!results.Columns.Cast<ColumnHeader>().Select(column => column.Text).SequenceEqual(["Name", "Format", "Size", "Date modified"]) ||
+            !results.OwnerDraw || results.Items[0] is not FileResultItem { DisplayName: "Theme" } ||
+            !results.Items[0].SubItems.Cast<ListViewItem.ListViewSubItem>().Skip(1).Select(cell => cell.Text)
+                .SequenceEqual(["MP3", "631 KiB", "5 December 2019, 13:38"])) return 19;
+        if (results.AccessibilityObject.GetChild(0)?.Name != "Theme, MP3, Size 631 KiB, Date modified 5 December 2019, 13:38") return 20;
+        ok &= results.CurrentLine == "Theme, MP3, Size 631 KiB, Date modified 5 December 2019, 13:38" &&
+            results.Items[1].SubItems[2].Text == "Not listed" && results.Items[1].SubItems[3].Text == "Not listed";
+        ok &= ContextGuide.Detail(DetailRow.Rows(directoryTrack, 1).Single(detail => detail.Kind == DetailKind.Station), true)
+            .StartsWith("This is the track name shown in the results.", StringComparison.Ordinal) &&
+            ContextGuide.Detail(DetailRow.Rows(a, 1).Single(detail => detail.Kind == DetailKind.Station), true)
+            .StartsWith("This is the station name shown in the results.", StringComparison.Ordinal);
+        resultView = ResultView.ForSearch(fileIndex: true);
+        RenderResults(preserveSelection: true);
+        ok &= Equals(results.FocusedItem?.Tag, directoryTrack) && results.FocusedItem?.Index == 1;
+        fileIndexResults = false;
+        resultView = default;
         searchResults = [a, b with { Format = "AAC" }];
         RenderResults(preserveSelection: false);
-        ok &= filterCommand.Enabled && findResultCommand.Enabled && results.Items.Count == 2;
+        ok &= filterCommand.Enabled && findResultCommand.Enabled && results.Items.Count == 2 &&
+            results.Columns.Count == 1 && results.Columns[0].Text == "Stream" && !results.OwnerDraw;
         resultView = new ResultView("AAC");
         RenderResults(preserveSelection: true);
         ok &= results.Items.Count == 1 && Selected?.Format == "AAC" && openBrowserCommand.Enabled;

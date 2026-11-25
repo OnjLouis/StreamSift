@@ -1,6 +1,6 @@
 namespace StreamSift;
 
-internal enum DetailKind { StreamAddress, FoundOn, Station, Format, Bitrate, Listeners, Selection }
+internal enum DetailKind { StreamAddress, FoundOn, Station, Format, Bitrate, Listeners, Selection, DateModified, FileSize }
 internal enum DetailAction { Search = 1, OpenBrowser, Copy, ScanServer, SavePlaylist, Review }
 
 internal sealed record DetailRow(DetailKind Kind, string Label, string Value, Uri? Address = null,
@@ -19,16 +19,19 @@ internal sealed record DetailRow(DetailKind Kind, string Label, string Value, Ur
         if (station == null) return [];
         var rows = new List<DetailRow>
         {
-            new(DetailKind.StreamAddress, "Stream address", station.Url.AbsoluteUri, station.Url,
+            new(DetailKind.StreamAddress, station.IsTrack ? "Track address" : "Stream address", station.Url.AbsoluteUri, station.Url,
                 PlaylistStation: station.IsHls ? station : null),
             new(DetailKind.FoundOn, "Found on", station.FoundOn.AbsoluteUri, station.FoundOn,
                 FoundOnIsStream: station.FoundOn.AbsoluteUri == station.Url.AbsoluteUri),
-            new(DetailKind.Station, "Station", station.Name),
+            new(DetailKind.Station, station.IsTrack ? "Track" : "Station", station.Name),
             new(DetailKind.Format, "Format", station.Format),
             new(DetailKind.Bitrate, "Bitrate", station.Bitrate is int rate ? $"{rate} kbps" : "not reported")
         };
         if (station.Listeners is int count) rows.Add(new(DetailKind.Listeners, "Listeners at scan", count.ToString()));
-        if (selectedCount > 1) rows.Add(new(DetailKind.Selection, "Selection", $"Details for the first of {selectedCount} streams"));
+        if (station.DateModifiedLabel is string modified) rows.Add(new(DetailKind.DateModified, "Date modified", modified));
+        if (station.FileSizeLabel is string size) rows.Add(new(DetailKind.FileSize, "File size", size));
+        if (selectedCount > 1) rows.Add(new(DetailKind.Selection, "Selection",
+            $"Details for the first of {selectedCount} {(station.IsTrack ? "tracks" : "streams")}"));
         return rows.ToArray();
     }
 }
@@ -42,7 +45,7 @@ internal sealed class DetailList : ListView
 
     internal DetailList()
     {
-        AccessibleName = "Stream details";
+        AccessibleName = "Details";
         View = View.Details;
         HeaderStyle = ColumnHeaderStyle.None;
         MultiSelect = false;

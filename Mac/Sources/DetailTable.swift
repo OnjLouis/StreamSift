@@ -2,7 +2,7 @@ import AppKit
 import Carbon.HIToolbox
 
 struct DetailRow: Equatable {
-    enum Kind { case streamAddress, foundOn, station, format, bitrate, listeners, selection }
+    enum Kind { case streamAddress, foundOn, station, format, bitrate, listeners, selection, dateModified, fileSize }
     let kind: Kind
     let label: String
     let value: String
@@ -39,19 +39,22 @@ struct DetailRow: Equatable {
     static func rows(for station: Station?, selectedCount: Int) -> [DetailRow] {
         guard let station else { return [] }
         var rows = [
-            DetailRow(kind: .streamAddress, label: "Stream address", value: station.url,
+            DetailRow(kind: .streamAddress, label: station.isTrack == true ? "Track address" : "Stream address", value: station.url,
                       playlistStation: station.format == "HLS" ? station : nil),
             DetailRow(kind: .foundOn, label: "Found on", value: station.foundOn,
                       foundOnIsStream: station.foundOn == station.url),
-            DetailRow(kind: .station, label: "Station", value: station.name),
+            DetailRow(kind: .station, label: station.isTrack == true ? "Track" : "Station", value: station.name),
             DetailRow(kind: .format, label: "Format", value: station.format),
             DetailRow(kind: .bitrate, label: "Bitrate", value: station.bitrate.map { "\($0) kbps" } ?? "not reported")
         ]
         if let count = station.listeners {
             rows.append(DetailRow(kind: .listeners, label: "Listeners at scan", value: String(count)))
         }
+        if let date = station.dateModifiedLabel { rows.append(DetailRow(kind: .dateModified, label: "Date modified", value: date)) }
+        if let size = station.fileSizeLabel { rows.append(DetailRow(kind: .fileSize, label: "File size", value: size)) }
         if selectedCount > 1 {
-            rows.append(DetailRow(kind: .selection, label: "Selection", value: "Details for the first of \(selectedCount) streams"))
+            let kind = station.isTrack == true ? "tracks" : "streams"
+            rows.append(DetailRow(kind: .selection, label: "Selection", value: "Details for the first of \(selectedCount) \(kind)"))
         }
         return rows
     }
