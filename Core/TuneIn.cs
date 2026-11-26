@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 namespace StreamSift;
 
 // Station-page route adapted from Jeff Bishop's QUILL Radio contribution.
-internal static partial class TuneIn
+internal static class TuneIn
 {
     private const string Service = "https://opml.radiotime.com/Tune.ashx";
     internal const int MaxStreams = 12;
@@ -13,14 +13,13 @@ internal static partial class TuneIn
         "session_id", "listenerid", "listener-id", "listener_id"
     };
 
-    [GeneratedRegex(@"^(?:(?<name>[^/]{1,200})-)?(?<id>s[0-9]{2,12})$", RegexOptions.IgnoreCase, 200)]
-    private static partial Regex StationSegment();
+    private static readonly Regex StationSegment = new(@"^(?:(?<name>[^/]{1,200})-)?(?<id>s[0-9]{2,12})$", RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(200));
 
     internal static Link? Source(Uri page)
     {
         if (!page.IsDefaultPort || page.IdnHost is not ("tunein.com" or "www.tunein.com") ||
             page.AbsolutePath.TrimEnd('/').Split('/') is not ["", "radio", var segment]) return null;
-        var match = StationSegment().Match(Uri.UnescapeDataString(segment));
+        var match = StationSegment.Match(Uri.UnescapeDataString(segment));
         if (!match.Success) return null;
         var id = match.Groups["id"].Value.ToLowerInvariant();
         var address = new Uri($"{Service}?id={id}&partnerId=RadioTime&formats=mp3,aac,ogg,hls");

@@ -9,17 +9,36 @@ namespace StreamSift;
 
 internal static class AppUpdate
 {
-    internal const string Product = "StreamSift", Platform = "windows-x64";
-    internal const string AssetTemplate = "StreamSift-Windows-x64-{version}.zip";
+    internal const string Product = "StreamSift";
+#if STREAMSIFT_WINDOWS7
+    internal const string TagPrefix = "win7-v";
+#if STREAMSIFT_WINDOWS7_X86
+    internal const string Platform = "windows7-x86", AssetTemplate = "StreamSift-Windows7-x86-{version}.zip";
+    private const string InstalledProduct = "StreamSift for Windows 7 (win-x86)";
+#else
+    internal const string Platform = "windows7-x64", AssetTemplate = "StreamSift-Windows7-x64-{version}.zip";
+    private const string InstalledProduct = "StreamSift for Windows 7 (win-x64)";
+#endif
+    private static string UpdatesDirectory => Path.Combine(Product, "Windows7", Platform, "Updates");
+#else
+    internal const string TagPrefix = "v";
+    internal const string Platform = "windows-x64", AssetTemplate = "StreamSift-Windows-x64-{version}.zip";
+    private const string InstalledProduct = Product;
+    private static string UpdatesDirectory => Path.Combine(Product, "Updates");
+#endif
     private const string Repository = "/OnjLouis/StreamSift";
     internal const string ReleasesUrl = "https://github.com" + Repository + "/releases";
     private const string AppFile = "StreamSift.exe", ManifestFile = "manifest.json", SignatureFile = "manifest.sig";
     private const int MaxManifest = 1024 * 1024, MaxSignature = 8192;
     internal static readonly string[] ManagedFiles = [AppFile, "StreamSift.dll", "StreamSift.deps.json",
         "StreamSift.runtimeconfig.json", "Core.dll", "AngleSharp.dll", "Onj.SignedUpdater.dll",
-        "Manual.html", "AngleSharp-LICENSE.txt", "SignedUpdater-LICENSE.txt"];
+        "Manual.html", "AngleSharp-LICENSE.txt", "SignedUpdater-LICENSE.txt",
+#if STREAMSIFT_WINDOWS7
+        "System.Text.Encoding.CodePages.dll",
+#endif
+    ];
 
-    private static string Root => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), Product, "Updates");
+    private static string Root => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), UpdatesDirectory);
     internal static Version Current => Version.Parse(Program.Version);
 
     internal static string? VerificationKey()
@@ -49,10 +68,10 @@ internal static class AppUpdate
 
     internal static GitHubUpdates Client() => new(new UpdateTransport(), TimeSpan.FromSeconds(25));
     internal static Task<UpdateOffer> CheckAsync(GitHubUpdates client, CancellationToken token) =>
-        client.CheckAsync("OnjLouis", Product, "v", AssetTemplate, Current, token);
+        client.CheckAsync("OnjLouis", Product, TagPrefix, AssetTemplate, Current, token);
 
     internal static Task<UpdateOffer> ReadLatestReleaseAsync(GitHubUpdates client, CancellationToken token) =>
-        client.CheckAsync("OnjLouis", Product, "v", AssetTemplate, new Version(0, 0, 0), token);
+        client.CheckAsync("OnjLouis", Product, TagPrefix, AssetTemplate, new Version(0, 0, 0), token);
 
     internal static async Task StageAndStartAsync(GitHubUpdates client, UpdateOffer offer, UpdatePolicy policy, CancellationToken token)
     {
@@ -122,8 +141,7 @@ internal static class AppUpdate
             NoReparse(exe);
             if (Path.GetFullPath(exe).StartsWith(Root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("The staging folder cannot be updated.");
-            if (!Version.TryParse(FileVersionInfo.GetVersionInfo(exe).FileVersion, out var installed) ||
-                installed.ToString(3) != Current.ToString(3))
+            if (!MatchesInstalledBuild(FileVersionInfo.GetVersionInfo(exe), Current))
                 throw new InvalidDataException("The installed program changed before the update.");
             ProcessGuard.WaitForExit(int.Parse(pid, CultureInfo.InvariantCulture), exe,
                 new DateTime(long.Parse(ticks, CultureInfo.InvariantCulture), DateTimeKind.Utc), TimeSpan.FromSeconds(30), CancellationToken.None);
@@ -167,9 +185,10 @@ internal static class AppUpdate
         var verified = PackageVerifier.VerifyManifest(manifest, signature, policy, expected);
         NoReparse(package);
         using (var archive = File.OpenRead(package))
+        using (var sha = SHA256.Create())
         {
             if (archive.Length != verified.Size ||
-                !Convert.ToHexString(SHA256.HashData(archive)).Equals(verified.Sha256, StringComparison.OrdinalIgnoreCase))
+                !Convert.ToHexString(sha.ComputeHash(archive)).Equals(verified.Sha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("The staged update package changed.");
         }
         UpdateInstaller.Recover(target, scratch, backup, policy);
@@ -181,10 +200,15 @@ internal static class AppUpdate
         NoReparse(path);
         using var stream = File.OpenRead(path);
         if (stream.Length < 1 || stream.Length > limit) throw new InvalidDataException("Invalid update metadata size.");
-        var data = new byte[(int)stream.Length];
-        stream.ReadExactly(data);
-        return data;
+        int length = (int)stream.Length;
+        using var reader = new BinaryReader(stream);
+        byte[] data = reader.ReadBytes(length);
+        return data.Length == length ? data : throw new InvalidDataException("Truncated update metadata.");
     }
+
+    internal static bool MatchesInstalledBuild(FileVersionInfo file, Version current) =>
+        file.ProductName == InstalledProduct && Version.TryParse(file.FileVersion, out var version) &&
+        version.Build >= 0 && version.ToString(3) == current.ToString(3);
 
     private static bool IsOwnJob(string job) => string.Equals(Path.GetDirectoryName(job), Root, StringComparison.OrdinalIgnoreCase) &&
         IsJobName(Path.GetFileName(job));
@@ -223,10 +247,11 @@ internal static class AppUpdate
 
     internal static void CheckOfferAddresses(UpdateOffer offer)
     {
+        string prefix = Repository + "/releases/download/" + TagPrefix + offer.Version.ToString(3) + "/";
         foreach (var asset in new[] { offer.Package, offer.Manifest, offer.Signature })
         {
             var path = new Uri(asset.Url);
-            if (!IsTrustedUrl(path) || path.Host != "github.com" || !path.AbsolutePath.EndsWith("/" + asset.Name, StringComparison.Ordinal))
+            if (!IsTrustedUrl(path) || path.Host != "github.com" || path.AbsolutePath != prefix + asset.Name)
                 throw new InvalidDataException("An update asset does not belong to the StreamSift release feed.");
         }
     }
@@ -239,7 +264,13 @@ internal static class AppUpdate
 
     private sealed class UpdateTransport : DelegatingHandler
     {
-        internal UpdateTransport() : base(new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false, UseProxy = false }) { }
+        internal UpdateTransport() : base(new HttpClientHandler
+        {
+            AllowAutoRedirect = false, UseCookies = false, UseProxy = false,
+#if STREAMSIFT_WINDOWS7
+            SslProtocols = System.Security.Authentication.SslProtocols.Tls12
+#endif
+        }) { }
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) =>
             request.RequestUri is Uri uri && IsTrustedUrl(uri) ? base.SendAsync(request, token) :
             throw new InvalidDataException("The update feed redirected to an unexpected address.");

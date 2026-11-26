@@ -4,7 +4,7 @@ namespace StreamSift;
 
 internal sealed record Preferences(bool SearchSounds = true, bool CheckUpdatesAtStartup = true,
     string? PlaylistFolder = null, bool AutomaticFallback = false, PlayerChoice MediaPlayer = PlayerChoice.Automatic,
-    string? CustomPlayerPath = null)
+    string? CustomPlayerPath = null, bool ShowToolbar = true)
 {
     internal static string UserDirectory => Path.Combine(AppContext.BaseDirectory, "User");
     internal static string DefaultPlaylistFolder => Path.Combine(UserDirectory, "Playlists");
@@ -23,7 +23,7 @@ internal sealed record Preferences(bool SearchSounds = true, bool CheckUpdatesAt
             return saved == null ? fallback : saved with
             {
                 PlaylistFolder = NormalizeFolder(saved.PlaylistFolder),
-                MediaPlayer = Enum.IsDefined(saved.MediaPlayer) ? saved.MediaPlayer : PlayerChoice.Automatic,
+                MediaPlayer = Enum.IsDefined(typeof(PlayerChoice), saved.MediaPlayer) ? saved.MediaPlayer : PlayerChoice.Automatic,
                 CustomPlayerPath = StreamPreview.CustomPath(saved.CustomPlayerPath)
             };
         }

@@ -10,7 +10,7 @@ internal sealed record LastResults(string Input, SearchMethod Method, Station[] 
     internal static LastResults? Capture(string input, SearchMethod method, IEnumerable<Station> stations, ResultView view, Uri? selection)
     {
         input = input.Trim();
-        if (!SearchHistory.CanRemember(input) || !Enum.IsDefined(method) ||
+        if (!SearchHistory.CanRemember(input) || !Enum.IsDefined(typeof(SearchMethod), method) ||
             (!SearchSequence.CanSearchStation(input) && (!PublicNetwork.TryInput(input, out var source) || !StableAddress(source))))
             return null;
         // HLS servers can embed session identifiers in a path, not just the query string.
@@ -18,7 +18,7 @@ internal sealed record LastResults(string Input, SearchMethod Method, Station[] 
                 SafeText(s.Name, 512) && SafeText(s.Format, 32) && StableAddress(s.Url) && StableAddress(s.FoundOn))
             .DistinctBy(s => s.Url).Take(MaxStations).ToArray();
         if (safe.Length == 0) return null;
-        if (!Enum.IsDefined(view.Order)) view = view with { Order = ResultOrder.Search };
+        if (!Enum.IsDefined(typeof(ResultOrder), view.Order)) view = view with { Order = ResultOrder.Search };
         view = view.RetainAvailable(safe);
         return new LastResults(input, method, safe, view, view.Apply(safe).Any(s => s.Url == selection) ? selection : null);
     }

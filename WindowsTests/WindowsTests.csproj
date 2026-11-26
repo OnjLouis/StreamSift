@@ -7,5 +7,11 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(StreamSiftWindows7)' == 'true'">
+    <TargetFramework>net6.0-windows</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+    <RuntimeFrameworkVersion>6.0.36</RuntimeFrameworkVersion>
+  </PropertyGroup>
   <ItemGroup><ProjectReference Include="../Windows/StreamSift.csproj" /></ItemGroup>
 </Project>

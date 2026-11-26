@@ -112,8 +112,8 @@ enum FileResultColumn: String, CaseIterable {
         switch self {
         case .name: return name
         case .format: return station.format
-        case .size: return station.fileSizeLabel ?? "Not listed"
-        case .dateModified: return station.dateModifiedLabel ?? "Not listed"
+        case .size: return station.isTrack == true ? station.fileSizeLabel ?? "Not listed" : ""
+        case .dateModified: return station.isTrack == true ? station.dateModifiedLabel ?? "Not listed" : ""
         }
     }
 

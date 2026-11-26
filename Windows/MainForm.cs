@@ -3,9 +3,11 @@ using System.Windows.Forms.Automation;
 
 namespace StreamSift;
 
-internal sealed class MainForm : Form
+internal sealed partial class MainForm : Form
 {
-    private readonly HttpClient client = PublicNetwork.CreateClient();
+    private const int MinimumWindowHeight = 370;
+    private const int MinimumListTextLines = 8;
+    private readonly HttpClient client = PublicNetwork.CreateClient(readStreamTitles: true);
     private readonly ComboBox url = new() { AccessibleName = "Web address or station name", Dock = DockStyle.Fill,
         DropDownStyle = ComboBoxStyle.DropDown, MaxLength = 4096, MaxDropDownItems = SearchHistory.Capacity };
     private readonly ShortcutButton find = new() { Text = "Find streams and files", ShortcutText = "Ctrl+Enter", AutoSize = true, TabIndex = 1 };
@@ -48,9 +50,10 @@ internal sealed class MainForm : Form
     {
         history = readHistory ? SearchHistory.Load(Preferences.UserDirectory) : [];
         restoreLastResults = readHistory;
+        favourites = new FavouriteStore(readHistory ? Preferences.UserDirectory : null);
         Text = Program.Name;
         ClientSize = new(720, 480);
-        MinimumSize = new(540, 370);
+        MinimumSize = new(540, MinimumWindowHeight);
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Font;
         sounds.Enabled = preferences.SearchSounds;
@@ -85,12 +88,14 @@ internal sealed class MainForm : Form
         findResultCommand = MenuCommand.Create("Find in results...", () => ShowResultFind(), Keys.Control | Keys.F);
         nextResultCommand = MenuCommand.Create("Find next", () => FindResult(false), Keys.F3);
         previousResultCommand = MenuCommand.Create("Find previous", () => FindResult(true), Keys.Shift | Keys.F3);
+        randomCommand = MenuCommand.Create("Play Random", PlayRandom, Keys.Control | Keys.Shift | Keys.R);
         actions.DropDownItems.AddRange([directoryCommand, browserCommand, refreshCommand, new ToolStripSeparator(),
-            previewCommand, openBrowserCommand, copyCommand, foobarCommand, openPlayerCommand, new ToolStripSeparator(),
+            previewCommand, randomCommand, openBrowserCommand, copyCommand, foobarCommand, openPlayerCommand, new ToolStripSeparator(),
             streamsCommand, detailsCommand, statusCommand, filterCommand, findResultCommand, nextResultCommand, previousResultCommand]);
         var options = new ToolStripMenuItem("&Options");
         preferencesCommand = MenuCommand.Create("Preferences...", ShowPreferences, Keys.Control | Keys.Oemcomma, "Ctrl+,");
-        options.DropDownItems.Add(preferencesCommand);
+        showToolbarCommand = MenuCommand.Create("Show &Toolbar", ToggleToolbar);
+        options.DropDownItems.AddRange([preferencesCommand, showToolbarCommand]);
         var support = new ToolStripMenuItem("&Help");
         support.DropDownItems.Add(MenuCommand.Create("Context help", ShowHelp, display: "F1"));
         support.DropDownItems.Add(MenuCommand.Create("Open &manual", OpenManual));
@@ -102,12 +107,17 @@ internal sealed class MainForm : Form
         support.DropDownItems.Add(MenuCommand.Create("GitHub project", () => SafeAction(() => Open("https://github.com/OnjLouis/StreamSift")), Keys.Control | Keys.F1));
         support.DropDownItems.Add(MenuCommand.Create("&Donate", () => SafeAction(() => Open("https://onj.me/donate"))));
         support.DropDownItems.Add(MenuCommand.Create("&About", () => ShowText("About StreamSift", "StreamSift " + Program.Version + "\r\nBy Andre Louis")));
-        menus.Items.AddRange([file, actions, options, support]);
+        menus.Items.AddRange([file, actions, BuildFavouritesMenu(), options, support]);
+        BuildToolbar();
         MainMenuStrip = menus;
+#if STREAMSIFT_WINDOWS7
+        browserCommand.Available = false;
+#endif
 
         var entry = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, RowCount = 2, Margin = new(0), TabIndex = 0
+            Dock = DockStyle.Fill, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2, RowCount = 2, Margin = new(0), TabIndex = 0
         };
         entry.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         entry.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -118,7 +128,11 @@ internal sealed class MainForm : Form
         find.TabIndex = 0;
         findDirectory.TabIndex = 1;
         cancel.TabIndex = 2;
-        var buttons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Margin = new(0), TabIndex = 2 };
+        var buttons = new FlowLayoutPanel
+        {
+            AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Dock = DockStyle.Fill, Margin = new(0), TabIndex = 2
+        };
         buttons.Controls.AddRange([find, findDirectory, cancel]);
         entry.Controls.Add(urlLabel, 0, 0);
         entry.Controls.Add(url, 1, 0);
@@ -137,6 +151,7 @@ internal sealed class MainForm : Form
                 case StreamAction.Preview: Preview(); break;
                 case StreamAction.SelectAll: SelectAllStreams(); break;
                 case StreamAction.OpenBrowser: OpenInBrowser(); break;
+                case StreamAction.Favourite: ToggleFavourite(); break;
                 case StreamAction.Review when results.CurrentLine is string line: ReviewLine(results, line); break;
             }
         };
@@ -145,9 +160,9 @@ internal sealed class MainForm : Form
         var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7, Padding = new(12) };
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        grid.RowStyles.Add(new RowStyle(SizeType.Percent, 70));
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 120));
+        grid.RowStyles.Add(new RowStyle(SizeType.Percent, 30));
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         grid.Controls.Add(entry, 0, 0);
@@ -158,6 +173,7 @@ internal sealed class MainForm : Form
         grid.Controls.Add(statusLabel, 0, 5);
         grid.Controls.Add(status, 0, 6);
         Controls.Add(grid);
+        Controls.Add(toolbar);
         Controls.Add(menus);
 
         help[url] = "Enter a public website, stream, file or folder address, station name or call sign. Alt+Down Arrow opens recent successful searches. Select an entry and press Enter to search.";
@@ -199,6 +215,20 @@ internal sealed class MainForm : Form
         SetStatus("Ready.");
     }
 
+    protected override void OnLayout(LayoutEventArgs e)
+    {
+        base.OnLayout(e);
+        if (results.Parent is not TableLayoutPanel grid) return;
+
+        var heights = grid.GetRowHeights();
+        if (heights.Length != grid.RowCount) return;
+
+        // Leave useful space for both lists after the search controls and status have been laid out.
+        int fixedHeight = Height - heights[grid.GetRow(results)] - heights[grid.GetRow(details)];
+        int minimumHeight = Math.Max(MinimumWindowHeight, fixedHeight + Font.Height * MinimumListTextLines);
+        if (MinimumSize.Height != minimumHeight) MinimumSize = new(MinimumSize.Width, minimumHeight);
+    }
+
     private Station? Selected => results.SelectedItems.Count == 0 ? null : results.SelectedItems[0].Tag as Station;
 
     private Station[] SelectedStreams() =>
@@ -219,7 +249,7 @@ internal sealed class MainForm : Form
     private void RememberLastResults()
     {
         if (!restoreLastResults || searchResults.Length == 0 || lastSearch is not { } last) return;
-        var selection = (results.FocusedItem?.Tag as Station)?.Url ?? Selected?.Url;
+        var selection = showingFavourites ? searchSelection : FocusedResult;
         try { LastResults.Capture(last.Input, last.Method, searchResults, resultView, selection)?.Save(Preferences.UserDirectory); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
@@ -243,9 +273,17 @@ internal sealed class MainForm : Form
             }
             return true;
         }
-        if (keyData == Keys.Escape && scan != null) { scan.Cancel(); return true; }
+        if (keyData == Keys.Escape && EscapeMainWindow()) return true;
         if (keyData == Keys.F1) { ShowHelp(); return true; }
         return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    private bool EscapeMainWindow()
+    {
+        if (scan != null) { scan.Cancel(); return true; }
+        if (!showingFavourites || url.DroppedDown || updateCheck != null) return false;
+        SwitchFavourites();
+        return true;
     }
 
     private static bool IsSearchKey(Keys key, bool inAddress) =>
@@ -287,6 +325,7 @@ internal sealed class MainForm : Form
             status.Focus();
             return;
         }
+        if (showingFavourites) SwitchFavourites();
         RememberLastResults();
         var operation = new CancellationTokenSource();
         scan = operation;
@@ -300,7 +339,7 @@ internal sealed class MainForm : Form
         UpdateSelection();
         SetStatus(refreshing ? "Refreshing results..." : stationSearch && requestedMethod == SearchMethod.Passive
             ? "Finding streams..." : StartingSearch(mode));
-        sounds.SearchStarted();
+        sounds.SearchStarted(operation.Token);
         url.Enabled = false;
         clearHistoryCommand.Enabled = false;
         find.Enabled = findDirectory.Enabled = false;
@@ -337,7 +376,7 @@ internal sealed class MainForm : Form
             fileIndexResults = found.EntryWasFileIndex;
             var previousFormat = resultView.Format;
             resultView = refreshing && sameResultType ? resultView.RetainAvailable(searchResults, fileIndexResults)
-                : ResultView.ForSearch(fileIndexResults);
+                : ResultView.ForSearch(fileIndexResults, found.PreferListedOrder);
             RenderResults(preserveSelection: refreshing);
             RememberLastResults();
             focusResults = visibleResults.Length != 0;
@@ -350,13 +389,14 @@ internal sealed class MainForm : Form
             var refreshed = refreshing ? "Refresh finished. " : "";
             var summary = found.Stations switch
             {
-                [] when found.EntryWasFileIndex => "No supported audio files listed.",
+                [] when found.EntryWasFileIndex => found.ListingNotice ?? "No supported audio files listed.",
                 [] => "No playable streams or files found.",
                 [{ IsTrack: true }] => found.EntryWasFileIndex ? "1 track listed." : "1 track found.",
                 [{ IsVideo: true }] => "1 video found.",
                 [_] => "1 stream found.",
                 _ when found.EntryWasFileIndex => $"{found.Stations.Count} tracks listed.",
-                _ when found.Stations.Any(s => s.IsVideo) => $"{found.Stations.Count} results found.",
+                _ when found.Stations.All(s => s.IsTrack) => $"{found.Stations.Count} tracks found.",
+                _ when found.Stations.Any(s => s.IsVideo || s.IsTrack) => $"{found.Stations.Count} results found.",
                 _ => $"{found.Stations.Count} streams found."
             };
             SetStatus(refreshed + sourceLabel + summary +
@@ -366,7 +406,7 @@ internal sealed class MainForm : Form
                 (run.Attempts > 1 ? $" Tried {run.Attempts} methods." : "") +
                 (run.FailedMethods > 0 ? $" Methods that could not finish: {run.FailedMethods}." : "") +
                 (refreshing && resultView.Format != null
-                    ? $" Showing {visibleResults.Length} {resultView.Format} {(found.EntryWasFileIndex ? "tracks" : "streams")}." : "") +
+                    ? $" Showing {visibleResults.Length} {resultView.Format} results." : "") +
                 (refreshing && previousFormat != null && resultView.Format == null && found.Stations.Count != 0
                     ? $" {previousFormat} is no longer available. Showing all formats." : "") +
                 (historyNotSaved ? " Recent searches could not be saved." : ""));
@@ -392,6 +432,7 @@ internal sealed class MainForm : Form
         }
         finally
         {
+            sounds.SearchStopped();
             scan = null;
             waitForScanOnClose = false;
             operation.Dispose();
@@ -585,13 +626,15 @@ internal sealed class MainForm : Form
             return new FileResultItem(station, name);
         return new ListViewItem(name + (station.IsTrack ? ", Track, " : ", ") + station.Format +
             (station.Bitrate is int bitrate ? $", {bitrate} kbps" : "") +
-            (station.Listeners is int count ? ", " + ResultView.ListenerLabel(count) : "")) { Tag = station };
+            (station.Listeners is int count ? ", " + ResultView.ListenerLabel(count) : "") +
+            (station.ScanTitle is string title ? ", Playing, " + title : "")) { Tag = station };
     }
 
     private void RenderResults(bool preserveSelection, Uri? restoredSelection = null)
     {
-        var next = resultView.Apply(searchResults);
-        if (results.ShowsFileColumns != fileIndexResults || !visibleResults.SequenceEqual(next))
+        bool fileColumns = FileColumns;
+        var next = ActiveView.Apply(ActiveResults);
+        if (!preserveSelection || results.ShowsFileColumns != fileColumns || !visibleResults.SequenceEqual(next))
         {
             HashSet<Uri> selected = preserveSelection ? SelectedStreams().Select(s => s.Url).ToHashSet() :
                 restoredSelection != null ? [restoredSelection] : [];
@@ -602,10 +645,10 @@ internal sealed class MainForm : Form
             try
             {
                 results.Items.Clear();
-                results.SetFileColumns(fileIndexResults);
+                results.SetFileColumns(fileColumns);
                 for (int i = 0; i < next.Length; i++)
                 {
-                    var row = results.Items.Add(ResultRow(next[i], names[i], fileIndexResults));
+                    var row = results.Items.Add(ResultRow(next[i], names[i], fileColumns));
                     row.Selected = selected.Contains(next[i].Url);
                     if (row.Selected && next[i].Url == focused) row.Focused = true;
                 }
@@ -623,13 +666,15 @@ internal sealed class MainForm : Form
 
     private void ShowResultFilter()
     {
-        if (searchResults.Length == 0) return;
-        using var dialog = ResultDialog.Filter(searchResults, resultView, OpenManual, out var read);
+        var source = ActiveResults;
+        if (source.Length == 0) return;
+        using var dialog = ResultDialog.Filter(source, ActiveView, OpenManual, out var read);
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        resultView = read();
+        if (showingFavourites) favouriteView = read();
+        else resultView = read();
         RenderResults(preserveSelection: true);
-        var kind = searchResults[0].IsTrack ? "tracks" : "streams";
-        SetStatus($"Showing {visibleResults.Length} of {searchResults.Length} {kind}.");
+        var kind = showingFavourites ? "favourites" : source[0].IsTrack ? "tracks" : "streams";
+        SetStatus($"Showing {visibleResults.Length} of {source.Length} {kind}.");
         results.Select();
     }
 
@@ -664,8 +709,8 @@ internal sealed class MainForm : Form
         var selected = Selected;
         streamsLabel.Enabled = streamsCommand.Enabled = results.TabStop = results.Items.Count != 0;
         detailsLabel.Enabled = detailsCommand.Enabled = details.TabStop = selected != null;
-        refreshCommand.Enabled = scan == null && updateCheck == null && lastSearch.HasValue;
-        filterCommand.Enabled = scan == null && searchResults.Length != 0;
+        refreshCommand.Enabled = !showingFavourites && scan == null && updateCheck == null && lastSearch.HasValue;
+        filterCommand.Enabled = scan == null && ActiveResults.Length != 0;
         findResultCommand.Enabled = nextResultCommand.Enabled = previousResultCommand.Enabled = scan == null && visibleResults.Length != 0;
         copyCommand.Enabled = foobarCommand.Enabled = saveCommand.Enabled = openPlayerCommand.Enabled = selected != null;
         var tracks = results.TracksSelected;
@@ -675,6 +720,7 @@ internal sealed class MainForm : Form
         copyCommand.Text = count > 1 ? "Copy addresses" : "Copy address";
         details.CanSearch = scan == null && updateCheck == null;
         details.ShowRows(DetailRow.Rows(selected, count));
+        UpdateFavouritesCommands(count == 1 ? selected : null);
     }
 
     private void RunDetailAction(DetailAction action, DetailRow row)
@@ -730,6 +776,7 @@ internal sealed class MainForm : Form
                 return;
             }
         }
+        if (showingFavourites) SwitchFavourites();
         lastSearch = null;
         url.SelectedIndex = -1;
         url.Text = "";
@@ -749,7 +796,7 @@ internal sealed class MainForm : Form
         if (status.Text == message) return;
         status.Text = message;
         status.Select(0, 0);
-        if (ContainsFocus && !status.Focused)
+        if (ContainsFocus && !status.Focused && OperatingSystem.IsWindowsVersionAtLeast(10, 0, 16299))
             status.AccessibilityObject.RaiseAutomationNotification(AutomationNotificationKind.Other,
                 AutomationNotificationProcessing.MostRecent, message);
     }
@@ -792,11 +839,12 @@ internal sealed class MainForm : Form
         Open(folder);
     });
 
-    private void Preview()
+    private void Preview() => Play(SelectedStreams());
+
+    private void Play(Station[] selection, bool random = false)
     {
-        var selection = SelectedStreams();
         if (selection.Length == 0) return;
-        if (selection.Length > 1 && !results.TracksSelected)
+        if (selection.Length > 1 && !selection.All(row => row.IsTrack))
         {
             SetStatus("Select one result to play it, or press Shift+Enter to save and open the selection.");
             return;
@@ -827,7 +875,9 @@ internal sealed class MainForm : Form
                 throw;
             }
             if (playlist != null) handoffs.Start();
-            SetStatus(selection.Length == 1 ? "Sent to " + player.Name + "." : $"Sent {selection.Length} tracks to {player.Name}.");
+            if (selection.Length == 1) lastPlayed = selection[0].Url;
+            SetStatus(random ? $"Sent {selection[0].Name} to {player.Name}." :
+                selection.Length == 1 ? "Sent to " + player.Name + "." : $"Sent {selection.Length} tracks to {player.Name}.");
         });
     }
 
@@ -909,7 +959,9 @@ internal sealed class MainForm : Form
         var focused = help.Keys.FirstOrDefault(c => c.ContainsFocus);
         var (title, text) = focused == details && details.SelectedDetail is DetailRow row
             ? (row.Label + " help", ContextGuide.Detail(row, details.CanSearch))
-            : focused == results ? ("Results help", ContextGuide.Streams(results.SelectedItems.Count, results.TracksSelected, fileIndexResults))
+            : focused == results ? ("Results help", ContextGuide.Streams(results.SelectedItems.Count, results.TracksSelected, FileColumns) +
+                "\r\nControl+D adds or removes a favourite. Control+Shift+B switches views. Control+Shift+R plays a random visible result." +
+                (showingFavourites ? "\r\nEscape returns to search results." : ""))
             : ("Context help", focused == null ? help[url] : help[focused]);
         using var dialog = new TextDialog(title, text, OpenManual);
         dialog.ShowDialog(this);
@@ -1028,6 +1080,21 @@ internal sealed class MainForm : Form
             .SelectMany(item => item.DropDownItems.OfType<ToolStripMenuItem>())
             .Select(item => item.ShortcutKeys).Where(keys => keys != Keys.None).ToArray();
         ok &= shortcuts.Length == shortcuts.Distinct().Count();
+        ok &= importFavouritesCommand.ShortcutKeys == (Keys.Control | Keys.Shift | Keys.I) &&
+            exportFavouritesCommand.ShortcutKeys == (Keys.Control | Keys.Shift | Keys.E) &&
+            randomCommand.OwnerItem?.Text == "&Actions" && !favouriteTool.Enabled && !toolbar.TabStop &&
+            toolbar.Parent == this && favouriteTool.ToolTipText?.EndsWith("(Ctrl+D)", StringComparison.OrdinalIgnoreCase) == true;
+        bool toolbarWasVisible = showToolbarCommand.Checked;
+        var topMenus = MainMenuStrip!.Items.OfType<ToolStripMenuItem>().ToArray();
+        ok &= Control.IsMnemonic('I', showFavouritesCommand.OwnerItem?.Text ?? "") &&
+            topMenus.Count(item => Control.IsMnemonic('I', item.Text ?? "")) == 1 &&
+            !topMenus.Any(item => item.Text?.Replace("&", "", StringComparison.Ordinal) == "View") &&
+            showToolbarCommand.OwnerItem == preferencesCommand.OwnerItem &&
+            showToolbarCommand.OwnerItem?.Text == "&Options";
+        showToolbarCommand.PerformClick();
+        ok &= showToolbarCommand.Checked != toolbarWasVisible && preferences.ShowToolbar == showToolbarCommand.Checked;
+        showToolbarCommand.PerformClick();
+        ok &= showToolbarCommand.Checked == toolbarWasVisible && preferences.ShowToolbar == toolbarWasVisible;
         foreach (var list in MainMenuStrip!.Items.OfType<ToolStripMenuItem>()
                      .Select(i => i.DropDownItems.OfType<ToolStripMenuItem>()).Append(MainMenuStrip.Items.OfType<ToolStripMenuItem>()))
         {
@@ -1205,6 +1272,35 @@ internal sealed class MainForm : Form
         ok &= url.Text == "example.com" && status.Text.StartsWith("Restored 2 streams", StringComparison.Ordinal) &&
             refreshCommand.Enabled && Selected?.Url == b.Url && ActiveControl == results &&
             details.SelectedDetail?.Address == b.Url;
+        ToggleFavourite();
+        ok &= favourites.Items.Select(row => row.Url).SequenceEqual([b.Url]) &&
+            toggleFavouriteCommand.Text == "Remove from Favourites" && favouriteTool.Enabled &&
+            favouriteTool.Text == "Remove from Favourites" && favouriteTool.Owner == toolbar;
+        // The control check runs before showing the window, when WinForms cannot select a visible control.
+        Control? TabStopAfter(Control current, bool forward)
+        {
+            var next = GetNextControl(current, forward);
+            while (next != null && (!next.TabStop || !next.Enabled)) next = GetNextControl(next, forward);
+            return next;
+        }
+        if (TabStopAfter(results, forward: true) != details || TabStopAfter(details, forward: false) != results)
+            return 21;
+        showFavouritesCommand.PerformClick();
+        ok &= results.AccessibleName == "Favourites" && Selected?.Url == b.Url && !refreshCommand.Enabled &&
+            exportFavouritesCommand.Enabled && randomCommand.Enabled &&
+            status.Text.EndsWith("Press Escape to return to search results.", StringComparison.Ordinal) &&
+            showFavouritesCommand.ShortcutKeys == (Keys.Control | Keys.Shift | Keys.B);
+        var escapeMessage = new Message();
+        if (!ProcessCmdKey(ref escapeMessage, Keys.Escape) || results.AccessibleName != "Results" ||
+            Selected?.Url != b.Url || ActiveControl != results || EscapeMainWindow()) return 22;
+        showFavouritesCommand.PerformClick();
+        ToggleFavourite();
+        ok &= favourites.Items.Length == 0 && !exportFavouritesCommand.Enabled && !randomCommand.Enabled;
+        showFavouritesCommand.PerformClick();
+        ok &= results.AccessibleName == "Results" && Selected?.Url == b.Url && refreshCommand.Enabled;
+        var titled = b with { ScanTitle = "Example song" };
+        ok &= ResultRow(titled, titled.Name).Text.EndsWith("Playing, Example song", StringComparison.Ordinal) &&
+            DetailRow.Rows(titled, 1).Any(row => row is { Label: "Playing", Value: "Example song" });
         ResetSearch();
         ok &= url.Text.Length == 0 && results.Items.Count == 0 && !refreshCommand.Enabled;
         ok &= !results.TabStop && !details.TabStop && status.TabStop && !streamsCommand.Enabled && !detailsCommand.Enabled;

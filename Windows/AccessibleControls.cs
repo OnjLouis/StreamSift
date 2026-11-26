@@ -6,7 +6,7 @@ namespace StreamSift;
 internal sealed class ShortcutButton : Button
 {
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    internal required string ShortcutText { get; init; }
+    internal string ShortcutText { get; init; } = "";
     protected override AccessibleObject CreateAccessibilityInstance() => new ShortcutObject(this);
     private sealed class ShortcutObject(ShortcutButton owner) : ButtonBaseAccessibleObject(owner)
     {

@@ -22,7 +22,15 @@ Select multiple results to save them as one playlist.
 Results can be filtered by format, sorted by name, bitrate or reported
 listener count, and searched without rescanning the website.
 
+Save stations and tracks in Favourites, transfer them as M3U8 playlists,
+or use Play Random in search results or Favourites. StreamSift also finds
+audio in podcast feeds, public Internet Archive items, and supported articles
+and demo pages.
+
 Read the [Windows manual](Manual.html) or [Mac manual](Mac/Manual.html).
+
+### Search
+
 Normal scans do not execute site JavaScript. The optional Find with Browser
 command uses an installed Chrome or Edge in a temporary session without
 sharing your browser profile or logins.
@@ -32,6 +40,8 @@ Icecast, SHOUTcast, Global and the Locus Sonus soundmap. The
 public-directory command matches websites against Radio Browser; station
 names and call signs are matched against Radio Browser and the
 [International Public Radio Directory](https://iprd-org.github.io/iprd/).
+If these yield no playable match, station-name searches also check the public
+[Xiph Icecast directory](https://dir.xiph.org/).
 StreamSift matches catalogue data locally and can reuse a matching recent
 station website on a name search. It verifies the streams again and can
 prefer an equivalent media-player address when a streaming panel offers one.
@@ -71,6 +81,29 @@ On Windows, build `WindowsTests/WindowsTests.csproj` and run the resulting
 only argument to check preferences, player handoff and signed updates.
 The vendored updater is from Onj Signed Updater commit
 `58aaf32bc3bb3e4488395b23686362e753546464`.
+
+### Windows 7
+
+The Windows 7 SP1 build uses the final .NET 6.0.36 Desktop Runtime for the
+selected architecture. Microsoft has ended support for Windows 7 and .NET 6.
+Passive search, radio directory lookup, and external-player playback are
+available. Browser-assisted search requires the current desktop build and
+a supported browser. HTTPS requires TLS 1.2 and an up-to-date certificate
+store. See [Microsoft's Windows prerequisites](https://learn.microsoft.com/en-us/dotnet/core/install/windows)
+and [.NET 6.0.36 Desktop Runtime downloads](https://dotnet.microsoft.com/en-us/download/dotnet/6.0).
+
+```powershell
+dotnet publish Windows/StreamSift.csproj -c Release -p:StreamSiftWindows7=true -r win-x86 --no-self-contained --artifacts-path ../StreamSift-win7-x86
+dotnet publish Windows/StreamSift.csproj -c Release -p:StreamSiftWindows7=true -r win-x64 --no-self-contained --artifacts-path ../StreamSift-win7-x64
+```
+
+Build `WindowsTests/WindowsTests.csproj` with the same property and runtime
+identifier to exercise the legacy updater. The Windows 7 release family
+uses `win7-v<version>` tags and signed `StreamSift-Windows7-x86-<version>.zip`
+and `StreamSift-Windows7-x64-<version>.zip` assets. Their signed platform
+identifiers are `windows7-x86` and `windows7-x64`. Publish these tags with
+GitHub's latest designation disabled so the macOS release feed keeps its
+ordinary desktop release.
 
 On Mac, run the following with Xcode and the .NET 10 SDK installed. The
 universal app bundles a native copy of the shared scanner, so users do

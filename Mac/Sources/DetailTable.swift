@@ -2,7 +2,7 @@ import AppKit
 import Carbon.HIToolbox
 
 struct DetailRow: Equatable {
-    enum Kind { case streamAddress, foundOn, station, format, bitrate, listeners, selection, dateModified, fileSize }
+    enum Kind { case streamAddress, foundOn, station, format, bitrate, listeners, selection, dateModified, fileSize, scanTitle }
     let kind: Kind
     let label: String
     let value: String
@@ -50,6 +50,7 @@ struct DetailRow: Equatable {
         if let count = station.listeners {
             rows.append(DetailRow(kind: .listeners, label: "Listeners at scan", value: String(count)))
         }
+        if let title = station.scanTitle { rows.append(DetailRow(kind: .scanTitle, label: "Playing", value: title)) }
         if let date = station.dateModifiedLabel { rows.append(DetailRow(kind: .dateModified, label: "Date modified", value: date)) }
         if let size = station.fileSizeLabel { rows.append(DetailRow(kind: .fileSize, label: "File size", value: size)) }
         if selectedCount > 1 {

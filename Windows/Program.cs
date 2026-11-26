@@ -2,7 +2,11 @@ namespace StreamSift;
 
 internal static class Program
 {
+#if STREAMSIFT_WINDOWS7
+    internal const string Name = "StreamSift for Windows 7";
+#else
     internal const string Name = "StreamSift";
+#endif
     internal static string Version { get; } = typeof(Program).Assembly.GetName().Version!.ToString(3);
 
     [STAThread]

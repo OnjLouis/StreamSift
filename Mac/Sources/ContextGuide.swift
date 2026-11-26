@@ -44,6 +44,8 @@ enum ContextGuide {
         case .bitrate: description = "This is the reported bitrate in kilobits per second. Not all streams report it."
         case .listeners:
             description = "This is the listener count reported when the stream was checked. Command+R refreshes it if the server reports a new count."
+        case .scanTitle:
+            description = "This is the title reported by the station during the scan. Command+R checks for the current title."
         case .dateModified: description = "This is the date and time given by the directory."
         case .fileSize: description = "This is the file size given by the directory. The site may round the value."
         case .selection:

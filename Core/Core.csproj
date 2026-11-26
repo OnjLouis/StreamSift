@@ -4,8 +4,19 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(StreamSiftWindows7)' == 'true'">
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+  </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Tests" />
     <PackageReference Include="AngleSharp" Version="1.10.5" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(StreamSiftWindows7)' == 'true'">
+    <Compile Remove="BrowserDiscovery.cs" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(StreamSiftWindows7)' != 'true'">
+    <Compile Remove="BrowserDiscovery.Windows7.cs" />
   </ItemGroup>
 </Project>

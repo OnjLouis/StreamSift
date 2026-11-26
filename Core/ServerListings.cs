@@ -4,7 +4,7 @@ using AngleSharp.Dom;
 
 namespace StreamSift;
 
-internal sealed record ServerMount(Uri Address, string? Name, int? Bitrate = null, int? Listeners = null);
+internal sealed record ServerMount(Uri Address, string? Name, int? Bitrate = null, int? Listeners = null, string? ScanTitle = null);
 internal sealed record ServerListing(Uri Page, IReadOnlyList<ServerMount> Mounts, bool Truncated);
 
 internal static class ServerListings
@@ -67,8 +67,11 @@ internal static class ServerListings
                     !TryMount(page, advertised.AbsolutePath, out var url)) continue;
                 // The stats document can report a backend hostname or port. Test the public listener
                 // that actually served these stats instead of sending requests to that backend.
+                string? title = Extraction.Label(GetString(row, "title"));
+                string? artist = Extraction.Label(GetString(row, "artist"));
+                if (title != null && artist != null) title = Extraction.Label(artist + " - " + title);
                 if (!listing.Add(new ServerMount(url, Extraction.StationName(GetString(row, "server_name")), Bitrate(row),
-                    Nonnegative(IntValue(row, "listeners"))))) break;
+                    Nonnegative(IntValue(row, "listeners")), title))) break;
             }
         }
         else
@@ -79,7 +82,7 @@ internal static class ServerListings
                 if (IntValue(row, "streamstatus") != 1 || !AudioType(GetString(row, "content")) ||
                     !TryMount(page, GetString(row, "streampath"), out var url, allowRoot: true)) continue;
                 if (!listing.Add(new ServerMount(url, Extraction.StationName(GetString(row, "servertitle")), Bitrate(row),
-                    Nonnegative(IntValue(row, "currentlisteners"))))) break;
+                    Nonnegative(IntValue(row, "currentlisteners")), Extraction.Label(GetString(row, "songtitle"))))) break;
             }
         }
         return listing.Result();

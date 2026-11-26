@@ -40,6 +40,7 @@ internal static class ContextGuide
             DetailKind.Format => "This is the reported audio format. HLS is a live playlist format.",
             DetailKind.Bitrate => "This is the reported bitrate in kilobits per second. Not all streams report it.",
             DetailKind.Listeners => "This is the listener count reported when the stream was checked. F5 refreshes it if the server reports a new count.",
+            DetailKind.ScanTitle => "This is the title reported by the station during the scan. F5 checks for the current title.",
             DetailKind.DateModified => "This is the date and time given by the directory.",
             DetailKind.FileSize => "This is the file size given by the directory. The site may round the value.",
             _ => "Details shows the first selected result. Playlist and copy commands in Results use the full selection."

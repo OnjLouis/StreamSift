@@ -3,6 +3,8 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Xml;
+using System.Xml.Linq;
 
 namespace StreamSift;
 
@@ -18,6 +20,9 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
     private static readonly Uri ProviderPage = new("https://www.radio-browser.info/");
     private static readonly Uri Iprd = new("https://iprd-org.github.io/iprd/site_data/metadata/catalog.json");
     private static readonly Uri IprdPage = new("https://iprd-org.github.io/iprd/");
+    private static readonly Uri XiphPage = new("https://dir.xiph.org/");
+    private static readonly Uri XiphExport = new("https://dir.xiph.org/yp.xml");
+    private static readonly TimeSpan XiphFallbackLimit = TimeSpan.FromSeconds(25);
 
     internal Func<CancellationToken, Task<IReadOnlyList<string?>>> FindMirrors { get; init; } = DiscoverMirrorsAsync;
 
@@ -33,7 +38,7 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
         return await new Discovery(client).VerifyListedAsync(start, matches.Select(match => match.Link), cancel, progress);
     }
 
-    internal async Task<SearchResult> FindByNameAsync(string name, CancellationToken cancel)
+    internal async Task<SearchResult> FindByNameAsync(string name, CancellationToken cancel, bool preferHttpsPlayback = false)
     {
         string query = StationKey(SearchSequence.StationText(name));
         if (query.Length == 0) return new SearchResult([], 0, 0, false);
@@ -51,17 +56,45 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
         foreach (var provider in new[] { ProviderPage, IprdPage })
         {
             try { results.AddRange(await FindLinksAsync(provider, Score, cancel)); }
-            catch (Exception error) when (!cancel.IsCancellationRequested && error is
-                HttpRequestException or IOException or InvalidDataException or JsonException or OperationCanceledException or UnauthorizedAccessException)
+            catch (Exception error) when (!cancel.IsCancellationRequested && IsDirectoryFailure(error))
             { failed++; }
         }
         cancel.ThrowIfCancellationRequested();
-        if (failed == 2) throw new HttpRequestException("Both public radio directories were unavailable.");
         var candidates = results.OrderByDescending(match => match.Score).Select(match => match.Link)
-            .DistinctBy(link => link.Url.AbsoluteUri, StringComparer.Ordinal).Take(MaxMatches);
-        var verified = await new Discovery(client).VerifyListedAsync(ProviderPage, candidates, cancel);
-        return verified with { Unreachable = verified.Unreachable + failed };
+            .DistinctBy(link => link.Url.AbsoluteUri, StringComparer.Ordinal).Take(MaxMatches).ToArray();
+        var discovery = new Discovery(client);
+        var verified = await discovery.VerifyListedAsync(ProviderPage, candidates, cancel,
+            preferHttpsPlayback: preferHttpsPlayback);
+        if (verified.Stations.Any(station => !preferHttpsPlayback || station.Url.Scheme == Uri.UriSchemeHttps))
+            return verified with { Unreachable = verified.Unreachable + failed };
+
+        using var fallback = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        fallback.CancelAfter(XiphFallbackLimit);
+        try
+        {
+            var attempted = candidates.Select(link => link.Url).ToHashSet();
+            var matches = await FindLinksAsync(XiphPage, Score, fallback.Token);
+            var xiph = await discovery.VerifyListedAsync(XiphPage,
+                matches.Select(match => match.Link).Where(link => !attempted.Contains(link.Url)),
+                fallback.Token, preferHttpsPlayback: preferHttpsPlayback);
+            return new SearchResult(xiph.Stations.Concat(verified.Stations).DistinctBy(station => station.Url).Take(MaxMatches).ToArray(),
+                verified.Requests + xiph.Requests, verified.Unreachable + xiph.Unreachable + failed,
+                verified.LimitReached || xiph.LimitReached);
+        }
+        catch (Exception error) when (!cancel.IsCancellationRequested && IsDirectoryFailure(error))
+        {
+            if (failed == 2) throw new HttpRequestException("The public radio directories were unavailable.", error);
+            return verified with
+            {
+                Unreachable = verified.Unreachable + failed + 1,
+                LimitReached = verified.LimitReached || fallback.IsCancellationRequested
+            };
+        }
     }
+
+    private static bool IsDirectoryFailure(Exception error) => error is
+        HttpRequestException or IOException or InvalidDataException or JsonException or XmlException or
+        OperationCanceledException or UnauthorizedAccessException;
 
     private static string StationKey(string name) =>
         string.Join(' ', new string(name.ToLowerInvariant().Select(c => char.IsLetterOrDigit(c) ? c : ' ').ToArray())
@@ -74,8 +107,8 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
         var root = cacheDirectory ?? (OperatingSystem.IsMacOS()
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Library", "Caches", "StreamSift")
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "StreamSift", "Cache"));
-        bool secondary = provider == IprdPage;
-        var cache = Path.Combine(root, secondary ? "iprd-v1.json.gz" : "radio-browser-v1.json.gz");
+        var cache = Path.Combine(root, provider == XiphPage ? "xiph-v1.json.gz" :
+            provider == IprdPage ? "iprd-v1.json.gz" : "radio-browser-v1.json.gz");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancel);
         deadline.CancelAfter(CacheTimeout);
         var token = deadline.Token;
@@ -89,7 +122,7 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
         if (!fresh)
         {
             Directory.CreateDirectory(root);
-            var temp = Path.Combine(root, $"radio-browser-{Guid.NewGuid():N}.tmp");
+            var temp = Path.Combine(root, $"station-catalogue-{Guid.NewGuid():N}.tmp");
             try
             {
                 using var response = await OpenAsync();
@@ -99,10 +132,10 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
                 await using (var zip = new GZipStream(file, CompressionLevel.Fastest))
                 {
                     using var writer = new Utf8JsonWriter(zip);
-                    using var bounded = new BoundedInput(source);
+                    using var bounded = new BoundedInput(source, token);
                     writer.WriteStartArray();
                     int kept = 0;
-                    await foreach (var entry in ReadEntriesAsync(bounded, secondary, token))
+                    await foreach (var entry in ReadEntriesAsync(bounded, provider, token))
                     {
                         if (entry == null || !PublicNetwork.TryUrl(entry.Homepage ?? "", null, out var home) ||
                             !TryStream(entry.Url, home, out var stream)) continue;
@@ -126,21 +159,34 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
         }
         return matches;
 
-        async Task<HttpResponseMessage> OpenAsync() =>
-            secondary ? await client.GetAsync(Iprd, HttpCompletionOption.ResponseHeadersRead, token) : await OpenCatalogueAsync(token);
+        Task<HttpResponseMessage> OpenAsync()
+        {
+            if (provider == XiphPage) return client.GetAsync(XiphExport, HttpCompletionOption.ResponseHeadersRead, token);
+            if (provider == IprdPage) return client.GetAsync(Iprd, HttpCompletionOption.ResponseHeadersRead, token);
+            return OpenCatalogueAsync(token);
+        }
     }
 
-    private static async IAsyncEnumerable<DirectoryEntry?> ReadEntriesAsync(Stream source, bool secondary,
+    private static async IAsyncEnumerable<DirectoryEntry?> ReadEntriesAsync(Stream source, Uri provider,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken token)
     {
-        if (!secondary)
+        if (provider == XiphPage)
         {
-            await foreach (var entry in JsonSerializer.DeserializeAsyncEnumerable(source, CatalogueJson.Default.DirectoryEntry,
-                cancellationToken: token))
+            await foreach (var entry in ReadXiphEntriesAsync(source, token))
                 yield return entry;
             yield break;
         }
+        if (provider != IprdPage)
+        {
+            await foreach (var entry in ReadRadioBrowserEntries(source, token))
+                yield return entry;
+            yield break;
+        }
+#if NET6_0
+        var catalog = await JsonSerializer.DeserializeAsync<IprdCatalogue>(source, cancellationToken: token);
+#else
         var catalog = await JsonSerializer.DeserializeAsync(source, CatalogueJson.Default.IprdCatalogue, token);
+#endif
         if (catalog?.Stations == null) throw new JsonException("The IPRD stations list is missing.");
         foreach (var station in catalog.Stations)
         {
@@ -148,6 +194,29 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
             if (station?.Streams == null) continue;
             foreach (var stream in station.Streams.Take(12))
                 yield return new DirectoryEntry(station.Name, station.Website, stream?.Url, null);
+        }
+    }
+
+    private static async IAsyncEnumerable<DirectoryEntry> ReadXiphEntriesAsync(Stream source,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken token)
+    {
+        using var reader = XmlReader.Create(source, new XmlReaderSettings
+        {
+            Async = true, DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null,
+            MaxCharactersInDocument = MaxCatalogueBytes
+        });
+        if (await reader.MoveToContentAsync() != XmlNodeType.Element || reader.Name != "directory")
+            throw new XmlException("The Icecast directory document is missing.");
+        while (await reader.ReadAsync())
+        {
+            token.ThrowIfCancellationRequested();
+            if (reader.NodeType != XmlNodeType.Element || reader.Depth != 1 || reader.Name != "entry") continue;
+            using var item = reader.ReadSubtree();
+            var entry = await XElement.LoadAsync(item, LoadOptions.None, token);
+            var name = Extraction.StationName((string?)entry.Element("server_name"));
+            var address = (string?)entry.Element("listen_url");
+            if (name != null && !string.IsNullOrWhiteSpace(address))
+                yield return new DirectoryEntry(name, XiphPage.AbsoluteUri, address, null);
         }
     }
 
@@ -160,7 +229,7 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
         using var bounded = new BoundedInput(zip);
         var exact = new Dictionary<string, Ranked>(StringComparer.Ordinal);
         var partial = new Dictionary<string, Ranked>(StringComparer.Ordinal);
-        await foreach (var entry in JsonSerializer.DeserializeAsyncEnumerable(bounded, CatalogueJson.Default.DirectoryEntry, cancellationToken: token))
+        await foreach (var entry in ReadRadioBrowserEntries(bounded, token))
         {
             if (exact.Count == MaxMatches || entry == null ||
                 !PublicNetwork.TryUrl(entry.Homepage ?? "", null, out var home)) continue;
@@ -228,14 +297,18 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
     {
         var hosts = discovered.OfType<string>().Select(name => name.TrimEnd('.').ToLowerInvariant())
             .Where(IsMirror).Distinct(StringComparer.Ordinal).ToArray();
-        Random.Shared.Shuffle(hosts);
+        for (int index = hosts.Length - 1; index > 0; index--)
+        {
+            int other = Random.Shared.Next(index + 1);
+            (hosts[index], hosts[other]) = (hosts[other], hosts[index]);
+        }
         return [..hosts.Take(MaxDiscoveredMirrors), ..FallbackMirrors];
 
         static bool IsMirror(string host) => host.EndsWith(MirrorSuffix, StringComparison.Ordinal) &&
             !FallbackMirrors.Contains(host, StringComparer.Ordinal) &&
             host[..^MirrorSuffix.Length] is { Length: > 0 and <= 63 } label &&
             label[0] != '-' && label[^1] != '-' &&
-            label.All(c => char.IsAsciiLetterLower(c) || char.IsAsciiDigit(c) || c == '-');
+            label.All(c => Ascii.IsLower(c) || Ascii.IsDigit(c) || c == '-');
     }
 
     private static string HostKey(Uri address)
@@ -244,7 +317,14 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
         return host.StartsWith("www.", StringComparison.Ordinal) ? host[4..] : host;
     }
 
-    private sealed class BoundedInput(Stream source) : Stream
+    private static IAsyncEnumerable<DirectoryEntry?> ReadRadioBrowserEntries(Stream stream, CancellationToken token) =>
+#if NET6_0
+        JsonSerializer.DeserializeAsyncEnumerable<DirectoryEntry>(stream, cancellationToken: token);
+#else
+        JsonSerializer.DeserializeAsyncEnumerable(stream, CatalogueJson.Default.DirectoryEntry, cancellationToken: token);
+#endif
+
+    private sealed class BoundedInput(Stream source, CancellationToken readToken = default) : Stream
     {
         private int read;
         public override bool CanRead => true;
@@ -252,9 +332,15 @@ public sealed class DirectoryDiscovery(HttpClient client, string? cacheDirectory
         public override bool CanWrite => false;
         public override long Length => throw new NotSupportedException();
         public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
-        public override int Read(byte[] buffer, int offset, int count) => Checked(source.Read(buffer, offset, count));
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            readToken.ThrowIfCancellationRequested();
+            return Checked(source.Read(buffer, offset, count));
+        }
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
-            Checked(await source.ReadAsync(buffer, cancellationToken));
+            Checked(await source.ReadAsync(buffer, cancellationToken.CanBeCanceled ? cancellationToken : readToken));
         public override void Flush() => throw new NotSupportedException();
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();
@@ -282,6 +368,8 @@ internal sealed record IprdStation(
     [property: JsonPropertyName("streams")] IprdStream?[]? Streams);
 internal sealed record IprdStream([property: JsonPropertyName("url")] string? Url);
 
+#if !NET6_0
 [JsonSerializable(typeof(DirectoryEntry))]
 [JsonSerializable(typeof(IprdCatalogue))]
 internal sealed partial class CatalogueJson : JsonSerializerContext;
+#endif

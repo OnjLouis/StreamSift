@@ -42,11 +42,6 @@ internal sealed class ResultDialog : Form
         Shown += (_, _) => fields[0].Input.Focus();
     }
 
-    private static readonly string[] OrderNames =
-        ["Search order", "Station name, A to Z", "Station name, Z to A", "Bitrate, highest first", "Bitrate, lowest first",
-         "Listeners, most first", "Listeners, fewest first", "Date modified, newest first", "Date modified, oldest first",
-         "File size, largest first", "File size, smallest first"];
-
     internal static ResultDialog Filter(IReadOnlyList<Station> stations, ResultView current, Action openManual, out Func<ResultView> read)
     {
         var formats = ResultView.Formats(stations);
@@ -56,13 +51,7 @@ internal sealed class ResultDialog : Form
         var sort = new ComboBox { AccessibleName = "Sort by", DropDownStyle = ComboBoxStyle.DropDownList };
         format.Items.Add("All formats");
         format.Items.AddRange(formats);
-        sort.Items.AddRange(orders.Select(order => tracks ? order switch
-        {
-            ResultOrder.Search => "Listed order",
-            ResultOrder.NameAscending => "Track name, A to Z",
-            ResultOrder.NameDescending => "Track name, Z to A",
-            _ => OrderNames[(int)order]
-        } : OrderNames[(int)order]).ToArray());
+        sort.Items.AddRange(orders.Select(order => ResultView.OrderLabel(order, tracks)).ToArray());
         format.SelectedIndex = Array.IndexOf(formats, current.Format) + 1;
         sort.SelectedIndex = Math.Max(0, Array.IndexOf(orders, current.Order));
         read = () => new(format.SelectedIndex > 0 ? formats[format.SelectedIndex - 1] : null, orders[sort.SelectedIndex]);

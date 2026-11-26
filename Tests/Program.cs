@@ -169,6 +169,26 @@ var mp3 = new byte[900];
 foreach (var i in new[] { 0, 417 }) new byte[] { 0xff, 0xfb, 0x90, 0x64 }.CopyTo(mp3, i);
 var handler = new Fixture();
 using var fixtureClient = new HttpClient(handler);
+var titleFixture = new Fixture();
+const string titleAddress = "https://metadata.example/live";
+byte[] metadata = Encoding.UTF8.GetBytes("StreamTitle='Björk - Jóga';");
+int metadataBlocks = (metadata.Length + 15) / 16;
+var icy = new byte[mp3.Length + 1 + metadataBlocks * 16];
+mp3.CopyTo(icy, 0);
+icy[mp3.Length] = (byte)metadataBlocks;
+metadata.CopyTo(icy, mp3.Length + 1);
+titleFixture.Audio(titleAddress, icy, name: "Night radio", metaint: mp3.Length);
+using (var titleClient = new HttpClient(titleFixture))
+{
+    titleClient.DefaultRequestHeaders.TryAddWithoutValidation("Icy-MetaData", "1");
+    var titled = await new Discovery(titleClient).FindAsync(new Uri(titleAddress), CancellationToken.None);
+    Require(titled.Stations is [{ Name: "Night radio", ScanTitle: "Björk - Jóga" }] && titled.Requests == 1,
+        "Capture the ICY title without replacing the station name or opening another connection.");
+    titleFixture.Audio(titleAddress, mp3, name: "Night radio", metaint: mp3.Length);
+    var partial = await new Discovery(titleClient).FindAsync(new Uri(titleAddress), CancellationToken.None);
+    Require(partial.Stations is [{ Name: "Night radio", ScanTitle: null }],
+        "An absent title does not hide a verified live stream.");
+}
 var engine = new Discovery(fixtureClient);
 
 const string compatibilityPage = "https://harbourwaves.example/";
@@ -259,7 +279,8 @@ handler.Redirect("https://radio.example/blocked.mp3", "http://127.0.0.1/");
 handler.Redirect("https://streaming.radio.co/s1eb3875b8/listen", "https://s2.radio.co/s1eb3875b8/listen");
 handler.Audio("https://s2.radio.co/s1eb3875b8/listen", mp3, "Double Tap", "192");
 var results = await engine.FindAsync(new Uri("https://radio.example/"), CancellationToken.None);
-Require(results.Stations.Count == 6, $"Expected 6 distinct live results, found {results.Stations.Count}.");
+Require(results.Stations.Count == 7 && results.Stations.Count(row => !row.IsTrack) == 6,
+    $"Expected 6 distinct live results and one track, found {results.Stations.Count} results.");
 Require(results.Stations.Any(x => x.Name == "Double Tap" && x.Bitrate == 192 && x.Format == "MP3"), "Provider redirect and metadata.");
 Require(results.Stations.Any(x => x.Name == "Named Station"), "PLS title.");
 Require(results.Stations.Any(x => x.Name == "XML Radio"), "XSPF title.");
@@ -269,7 +290,8 @@ Require(results.Stations.Any(x => x.Url.Query == "?channel=two&region=uk" && x.N
 Require(!handler.Seen.Any(x => x.Contains("seg.") || x.Contains("video.m3u8") || x.Contains("irrelevant") || x.Contains("localhost") ||
     x.Contains("127.0.0.1") || x.Contains("style.css")), "Fetched a segment, video, private URL or irrelevant resource.");
 Require(results.Requests == handler.Seen.Count && !results.LimitReached, "Requests were not tracked correctly.");
-Require(results.Stations.All(x => !x.Url.AbsoluteUri.Contains("oldshow") && !x.Url.AbsoluteUri.Contains("vod")), "Recording returned as live.");
+Require(results.Stations.Single(row => row.IsTrack).Url.AbsolutePath == "/oldshow.mp3" &&
+    results.Stations.All(x => !x.Url.AbsoluteUri.Contains("vod")), "Label the embedded recording as a track and skip video-on-demand manifests.");
 Require(results.Unreachable == 1, "Blocked redirect not counted.");
 
 const string directTrackUrl = "https://station.example/oldshow.mp3";
@@ -290,6 +312,90 @@ foreach (var path in new[] { "audio?token=test", "redirected.mp3", "fixedlength.
 }
 var directLive = await engine.FindAsync(new Uri("https://station.example/directlive.mp3"), CancellationToken.None);
 Require(directLive.Stations is [{ Format: "MP3", IsTrack: false }], "Direct live MP3 playback still works.");
+
+const string interviewPage = "https://news.example/feature";
+const string interviewUrl = "https://media.example/interview.mp3?source=site";
+handler.Text(interviewPage, """
+    <title>Public interview</title>
+    <meta property="og:type" content="article">
+    <link rel="alternate" type="application/rss+xml" href="/category.rss">
+    <a href="https://media.example/interview.mp3?source=site">Listen</a>
+    <audio src="clip"></audio><a href="permission.mp3">Restricted recording</a>
+    """);
+handler.Audio(interviewUrl, mp3, finite: true);
+handler.Audio("https://news.example/clip", mp3, finite: true);
+handler.Fail("https://news.example/permission.mp3", HttpStatusCode.Forbidden);
+handler.Text("https://news.example/category.rss",
+    """<rss><channel><item><enclosure url="other.mp3"/></item></channel></rss>""", "application/rss+xml");
+var articleBefore = handler.Seen.Count;
+var interview = await engine.FindAsync(new Uri(interviewPage), CancellationToken.None);
+Require(interview.Stations.Count == 2 && interview.Stations.All(track => track.IsTrack && track.FoundOn.AbsoluteUri == interviewPage) &&
+    interview.Stations.Any(track => track.Name == "Public interview" && track.Url.AbsoluteUri == interviewUrl) &&
+    !handler.Seen.Skip(articleBefore).Contains("https://news.example/category.rss"),
+    "Find verified audio links and audio elements on the page before choosing an unrelated RSS feed.");
+
+const string sonicDemoPage = "https://www.soniccouture.com/en/products/test-demo/";
+const string sonicPlaylist = "https://www.soniccouture.com/mp3player/ajax.php";
+const string sonicDemo = "https://www.soniccouture.com/files/demos/Folder/Vibe%20%231.mp3";
+handler.Text(sonicDemoPage, """<a class="play_demos" data-id="46">Play Audio</a>""");
+handler.Text(sonicPlaylist, """
+    {"playlist":[{"Name":"First vibraphone demo","MP3File":"Folder/Vibe #1.mp3"},
+    {"Name":"Outside the demos folder","MP3File":"../escape.mp3"}]}
+    """, "application/json");
+handler.Audio(sonicDemo, mp3, finite: true);
+var sonicBefore = handler.Seen.Count;
+var sonic = await engine.FindAsync(new Uri(sonicDemoPage), CancellationToken.None);
+Require(sonic.Stations is [{ Name: "First vibraphone demo", IsTrack: true, Format: "MP3" }] &&
+    handler.Seen.Skip(sonicBefore).SequenceEqual([sonicDemoPage, sonicPlaylist, sonicDemo]) &&
+    handler.Forms.TryGetValue(sonicPlaylist, out var sonicForm) && sonicForm == "id=46&mode=2",
+    "Follow the public Soniccouture demo button and verify only safely resolved audio paths.");
+
+const string niDemoPage = "https://www.native-instruments.com/pages/example-demos";
+const string niPlaylist = "https://www.native-instruments.com/apps/awplayer/products/12345/tracks";
+const string niDemo = "https://assets.awplayer.com/publictrack";
+handler.Text(niDemoPage, """<title>Audio demos</title><!--""" + new string(' ', 790000) + """
+    --><main><p>[play type=&quot;audio&quot; id=&quot;12345&quot; label=&quot;Demo&quot;]</p></main>
+    """);
+handler.Text(niPlaylist, """
+    {"tracks":[
+      {"title":"Full demo","url":"https://assets.awplayer.com/publictrack","duration":36,"previewDuration":36},
+      {"title":"Limited preview","url":"https://assets.awplayer.com/limited","duration":90,"previewDuration":30},
+      {"title":"Wrong host","url":"https://other.example/file.mp3","duration":12,"previewDuration":12}
+    ]}
+    """, "application/json");
+handler.Audio(niDemo, mp3, finite: true);
+var niBefore = handler.Seen.Count;
+var ni = await engine.FindAsync(new Uri(niDemoPage), CancellationToken.None);
+Require(ni.Stations is [{ Name: "Full demo", IsTrack: true, Format: "MP3" }] &&
+    handler.Seen.Skip(niBefore).SequenceEqual([niDemoPage, niPlaylist, niDemo]),
+    "Verify an advertised Native Instruments demo and skip media whose public player limits playback to a shorter preview.");
+
+const string dataPlayerPage = "https://samples.example/preview";
+const string dataPlayerAudio = "https://samples.example/public-preview.mp3";
+handler.Text(dataPlayerPage, """<title>Sample Preview</title><div class="player" data-mp3="/public-preview.mp3"></div>""");
+handler.Audio(dataPlayerAudio, mp3, finite: true);
+var dataPlayer = await engine.FindAsync(new Uri(dataPlayerPage), CancellationToken.None);
+Require(dataPlayer.Stations is [{ Name: "Sample Preview", IsTrack: true, Format: "MP3" }],
+    "Verify a public MP3 advertised in a custom player element.");
+
+const string musicPreviewPage = "https://magnatune.com/artists/albums/example-album/";
+const string musicPreviewApi = "https://magnatune.com/api/albums/example-album";
+const string musicPreviewAudio = "https://magnatune.com/music/Artist/Album/title_spoken.mp3";
+handler.Text(musicPreviewApi, """
+    {"ok":true,"album":{"sku":"example-album","tracks":[
+      {"name":"Example song","preview_mp3":"https://magnatune.com/music/Artist/Album/title_spoken.mp3",
+       "clean_url":"https://magnatune.com/api/albums/example-album/tracks/1/file?format=wav"},
+      {"name":"Clean file","preview_mp3":"https://magnatune.com/music/Artist/Album/clean.mp3"},
+      {"name":"Wrong host","preview_mp3":"https://other.example/song_spoken.mp3"}]}}
+    """, "application/json");
+handler.Audio(musicPreviewAudio, mp3, finite: true);
+var musicBefore = handler.Seen.Count;
+var musicPreview = await engine.FindAsync(new Uri(musicPreviewPage), CancellationToken.None);
+Require(musicPreview.EntryWasWebsite &&
+    musicPreview.Stations is [{ Name: "Example song preview", IsTrack: true, Format: "MP3" }] &&
+    musicPreview.Stations[0].FoundOn.AbsoluteUri == musicPreviewPage &&
+    handler.Seen.Skip(musicBefore).SequenceEqual([musicPreviewApi, musicPreviewAudio]),
+    "Resolve only the public tagged MP3 preview from the documented Magnatune album response.");
 
 const string fileIndex = "https://files.example/media/";
 handler.Redirect(fileIndex.TrimEnd('/'), fileIndex);
@@ -343,6 +449,96 @@ handler.Text("https://files.example/empty/", "<title>Index of /empty</title><h1>
 var emptyIndex = await new SearchSequence(fixtureClient).FindAsync("https://files.example/empty/", SearchMethod.Passive, true, CancellationToken.None);
 Require(emptyIndex.Result.EntryWasFileIndex && emptyIndex.Result.Stations.Count == 0 && emptyIndex.Attempts == 1,
     "An index with no supported files reports an empty track listing without other search methods.");
+
+const string podcastPage = "https://podcast.example/show/";
+const string podcastFeed = podcastPage + "index.php?xml_feed=y";
+handler.Text(podcastPage, """
+    <a href="preview.mp3">Preview</a>
+    <a href="index.php?xml_feed=y">Click Here To Subscribe</a>
+    """);
+handler.Text(podcastFeed, """
+    <?xml version="1.0"?>
+    <rss version="2.0"><channel>
+      <item><title>Zulu episode</title><enclosure url="z.mp3" length="1024" type="audio/mpeg"/></item>
+      <item><title>Alpha episode</title><enclosure url="/episodes/2" length="2048" type="audio/mp4"/></item>
+      <item><title>Private</title><enclosure url="http://127.0.0.1/audio.mp3" type="audio/mpeg"/></item>
+      <item><title>Duplicate</title><enclosure url="z.mp3"/></item>
+      <item><title>Video</title><enclosure url="clip.mp4" type="video/mp4"/></item>
+    </channel></rss>
+    """, "text/xml");
+var podcastBefore = handler.Seen.Count;
+var podcast = await engine.FindAsync(new Uri(podcastPage), CancellationToken.None);
+Require(podcast.EntryWasFileIndex && podcast.PreferListedOrder && podcast.Stations is [
+        { Name: "Zulu episode", Format: "MP3", IsTrack: true, FileSizeBytes: 1024 },
+        { Name: "Alpha episode", Format: "M4A", IsTrack: true, FileSizeBytes: 2048 }] &&
+    handler.Seen.Skip(podcastBefore).SequenceEqual([podcastPage, podcastFeed]),
+    "Discover a podcast subscription link and list its audio enclosures in feed order without fetching episodes.");
+var directPodcast = await engine.FindAsync(new Uri(podcastFeed), CancellationToken.None);
+Require(directPodcast.PreferListedOrder && directPodcast.Stations.Select(track => track.Url)
+    .SequenceEqual(podcast.Stations.Select(track => track.Url)),
+    "A direct RSS feed lists the same episode links as its podcast page.");
+Require(podcast.Stations.All(track => track.FoundOn.AbsoluteUri == podcastPage),
+    "Episodes retain the public podcast page as their source.");
+handler.Text(podcastPage + "atom", """
+    <feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Field notes</title>
+    <link rel="enclosure" href="recording.opus" length="800" type="audio/ogg"/>
+    </entry></feed>
+    """, "application/atom+xml");
+var atom = await engine.FindAsync(new Uri(podcastPage + "atom"), CancellationToken.None);
+Require(atom.Stations is [{ Name: "Field notes", Format: "Ogg Opus", FileSizeBytes: 800 }],
+    "Recognize Atom audio enclosures.");
+handler.Text(podcastPage + "unsafe.rss", """
+    <!DOCTYPE rss SYSTEM "https://podcast.example/never-fetch.dtd"><rss><channel/></rss>
+    """, "application/rss+xml");
+var unsafeFeed = await engine.FindAsync(new Uri(podcastPage + "unsafe.rss"), CancellationToken.None);
+Require(unsafeFeed is { EntryWasFileIndex: true, ListingNotice: not null, Stations.Count: 0 } &&
+    !handler.Seen.Contains(podcastPage + "never-fetch.dtd"), "Reject a feed with a DOCTYPE without loading external XML.");
+
+const string archiveItem = "https://archive.org/details/test_audio_item";
+const string archiveMetadata = "https://archive.org/metadata/test_audio_item";
+handler.Text(archiveMetadata, """
+    {"metadata":{"identifier":"test_audio_item"},"files":[
+     {"name":"folder/a # song.mp3","title":"An audio track","size":"500","mtime":"1700000000"},
+     {"name":"hidden.mp3","private":1},{"name":"../escape.mp3"},{"name":"document.pdf"}]}
+    """, "application/json");
+var archiveBefore = handler.Seen.Count;
+var archive = await engine.FindAsync(new Uri(archiveItem), CancellationToken.None);
+Require(archive.EntryWasFileIndex && archive.Stations is [{ Name: "An audio track", IsTrack: true, FileSizeBytes: 500 }] &&
+    archive.Stations[0].Url.AbsoluteUri == "https://archive.org/download/test_audio_item/folder/a%20%23%20song.mp3" &&
+    archive.Stations[0].DateModified == DateTimeOffset.FromUnixTimeSeconds(1700000000).UtcDateTime &&
+    handler.Seen.Skip(archiveBefore).SequenceEqual([archiveMetadata]),
+    "Read only public audio from Internet Archive metadata and encode each file path segment.");
+handler.Text(archiveMetadata, """
+    {"metadata":{"identifier":"test_audio_item","access-restricted-item":"true"},"files":[{"name":"hidden.mp3"}]}
+    """, "application/json");
+var restricted = await engine.FindAsync(new Uri(archiveItem), CancellationToken.None);
+Require(restricted is { EntryWasFileIndex: true, Stations.Count: 0, ListingNotice: not null },
+    "Report an access-restricted Archive item without listing its audio.");
+
+const string torrentPage = "https://files.example/audio.torrent";
+static string TorrentString(string value) => $"{Encoding.UTF8.GetByteCount(value)}:{value}";
+const string torrentPieces = "12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaa";
+const string torrentFiles = "5:filesld6:lengthi600e4:pathl3:sub8:A #1.mp3eed6:lengthi70e4:pathl2:..10:escape.mp3eee";
+var torrentInfo = "4:infod" + torrentFiles + "4:name5:Audio" + torrentPieces + "e";
+var torrentBefore = handler.Seen.Count;
+handler.Audio(torrentPage, Encoding.UTF8.GetBytes("d" + torrentInfo +
+    "8:url-listl" + TorrentString("http://files.example/") + TorrentString("https://files.example/download/") + "ee"),
+    type: "application/octet-stream", finite: true);
+var torrent = await engine.FindAsync(new Uri(torrentPage), CancellationToken.None);
+Require(torrent.EntryWasFileIndex && torrent.Stations is [{ Name: "A #1", IsTrack: true, FileSizeBytes: 600 }] &&
+    torrent.Stations[0].Url.AbsoluteUri == "https://files.example/download/Audio/sub/A%20%231.mp3" &&
+    handler.Seen.Skip(torrentBefore).SequenceEqual([torrentPage]),
+    "Resolve a multi-file torrent through its HTTPS web seed without requesting audio or accepting traversal.");
+handler.Audio(torrentPage, Encoding.UTF8.GetBytes("d4:infod6:lengthi300e4:name9:track.wav" + torrentPieces + "e" +
+    "8:url-list" + TorrentString("https://files.example/static-track") + "e"), type: "application/x-bittorrent", finite: true);
+var singleTorrent = await engine.FindAsync(new Uri(torrentPage), CancellationToken.None);
+Require(singleTorrent.Stations is [{ Name: "track", Format: "WAV", FileSizeBytes: 300 }] &&
+    singleTorrent.Stations[0].Url.AbsoluteUri == "https://files.example/static-track",
+    "Use the exact HTTP web seed for a single-file torrent.");
+handler.Audio(torrentPage, Encoding.UTF8.GetBytes("d" + torrentInfo + "e"), type: "application/x-bittorrent", finite: true);
+var peerOnly = await engine.FindAsync(new Uri(torrentPage), CancellationToken.None);
+Require(peerOnly is { EntryWasFileIndex: true, Stations.Count: 0, ListingNotice: not null } &&
+    peerOnly.ListingNotice.Contains("web seed"), "Explain why a peer-only torrent cannot be played.");
 
 handler.Text("https://tv.example/", """<title>Public TV</title><a href="/watch/">Watch live</a>""");
 handler.Text("https://tv.example/watch/", """
@@ -755,6 +951,40 @@ try
     var byFilename = await lookup.FindByNameAsync("W TEST.mp3", CancellationToken.None);
     Require(byFilename.Stations is [{ Name: "WTEST" }], "Match compact names with an optional audio filename suffix.");
 
+    const string xiphExport = "https://dir.xiph.org/yp.xml";
+    const string xiphMount = "https://radio.example/xiph-only";
+    handler.Text(xiphExport, """
+        <directory>
+          <entry><server_name>Xiph only radio</server_name><listen_url>https://radio.example/xiph-only</listen_url></entry>
+          <entry><server_name>Xiph only radio</server_name><listen_url>http://127.0.0.1/private</listen_url></entry>
+          <entry><server_name>Xiph only radio</server_name><listen_url></listen_url></entry>
+          <entry><server_name>Unrelated radio</server_name><listen_url>https://radio.example/unrelated</listen_url></entry>
+        </directory>
+        """, "application/xml");
+    handler.Audio(xiphMount, mp3);
+    int beforeXiph = handler.Seen.Count;
+    var xiph = await lookup.FindByNameAsync("Xiph only radio", CancellationToken.None);
+    Require(xiph.Stations is [{ Name: "Xiph only radio", IsTrack: false }] &&
+        xiph.Stations[0].FoundOn.AbsoluteUri == "https://dir.xiph.org/" &&
+        handler.Seen.Skip(beforeXiph).SequenceEqual([xiphExport, xiphMount]),
+        "Use the public Icecast catalogue only after the other catalogues miss, verifying only safe matching streams.");
+    int beforeWarmXiph = handler.Seen.Count;
+    var warmXiph = await lookup.FindByNameAsync("xiph only radio", CancellationToken.None);
+    Require(warmXiph.Stations.Count == 1 && handler.Seen.Skip(beforeWarmXiph).SequenceEqual([xiphMount]),
+        "Reuse the public Icecast catalogue cache and keep station queries local.");
+    var xiphCache = Path.Combine(directoryCache.FullName, "xiph-v1.json.gz");
+    var previousXiph = File.ReadAllBytes(xiphCache);
+    File.SetLastWriteTimeUtc(xiphCache, DateTime.UtcNow.AddDays(-2));
+    handler.Text(xiphExport, """
+        <!DOCTYPE directory SYSTEM "https://dir.xiph.org/never-fetch.dtd"><directory/>
+        """, "application/xml");
+    int beforeInvalidXiph = handler.Seen.Count;
+    var invalidXiph = await lookup.FindByNameAsync("Xiph only radio", CancellationToken.None);
+    Require(invalidXiph.Stations.Count == 0 && invalidXiph.Unreachable == 1 &&
+        handler.Seen.Skip(beforeInvalidXiph).SequenceEqual([xiphExport]) &&
+        File.ReadAllBytes(xiphCache).SequenceEqual(previousXiph),
+        "Reject external XML declarations and preserve the last valid public catalogue.");
+
     // Files from the released version may predate the new writer-side validation.
     var oldCachePath = Path.Combine(directoryCache.FullName, "radio-browser-v1.json.gz");
     using (var file = File.Create(oldCachePath))
@@ -774,6 +1004,24 @@ try
         "Existing caches cannot reintroduce member feeds or mismatched station identities.");
 }
 finally { directoryCache.Delete(recursive: true); }
+
+const string insecureMount = "http://radio.example/secure-mount";
+const string secureMount = "https://radio.example/secure-mount";
+const string insecureOnlyMount = "http://radio.example/without-tls";
+handler.Audio(insecureMount, mp3, name: "HTTPS fixture");
+handler.Audio(secureMount, mp3, name: "HTTPS fixture");
+handler.Audio(insecureOnlyMount, mp3, name: "HTTP fixture");
+handler.Redirect("https://radio.example/without-tls", insecureOnlyMount);
+var publicDirectory = new Uri("https://directory.example");
+Link[] schemes = [new(new Uri(insecureMount), publicDirectory, LinkKind.Audio),
+    new(new Uri(insecureOnlyMount), publicDirectory, LinkKind.Audio)];
+var schemeDiscovery = new Discovery(fixtureClient);
+var desktopSchemes = await schemeDiscovery.VerifyListedAsync(publicDirectory, schemes, CancellationToken.None);
+var mobileSchemes = await schemeDiscovery.VerifyListedAsync(publicDirectory, schemes, CancellationToken.None, preferHttpsPlayback: true);
+Require(desktopSchemes.Stations.All(row => row.Url.Scheme == "http") &&
+    mobileSchemes.Stations.Select(row => row.Url.AbsoluteUri).SequenceEqual([secureMount, insecureOnlyMount]) &&
+    mobileSchemes.Requests == desktopSchemes.Requests + 2,
+    "Mobile station lookup verifies a public TLS counterpart and keeps HTTP-only results identifiable without accepting a downgrade.");
 
 handler.Fail(directoryApi, HttpStatusCode.BadGateway);
 var directoryMirror = new UriBuilder(directoryApi) { Host = "de2.api.radio-browser.info" }.Uri.AbsoluteUri;
@@ -1051,11 +1299,12 @@ sealed class Fixture : HttpMessageHandler
 {
     private readonly Dictionary<string, Func<HttpResponseMessage>> fixtures = new(StringComparer.Ordinal);
     public List<string> Seen { get; } = [];
+    public Dictionary<string, string> Forms { get; } = [];
     public Action? OnRequest { get; set; }
     public void Text(string uri, string text, string type = "text/html") => fixtures[uri] = () =>
         new(HttpStatusCode.OK) { Content = new StringContent(text, Encoding.UTF8, type) };
     public void Audio(string uri, byte[] bytes, string? name = null, string? br = null,
-        string type = "audio/mpeg", bool finite = false, string? publicPage = null) => fixtures[uri] = () =>
+        string type = "audio/mpeg", bool finite = false, string? publicPage = null, int? metaint = null) => fixtures[uri] = () =>
     {
         var r = new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -1065,6 +1314,7 @@ sealed class Fixture : HttpMessageHandler
         if (name != null) r.Headers.TryAddWithoutValidation("icy-name", name);
         if (br != null) r.Headers.TryAddWithoutValidation("icy-br", br);
         if (publicPage != null) r.Headers.TryAddWithoutValidation("icy-url", publicPage);
+        if (metaint.HasValue) r.Headers.TryAddWithoutValidation("icy-metaint", metaint.Value.ToString());
         return r;
     };
     public void Redirect(string uri, string to) => fixtures[uri] = () =>
@@ -1078,15 +1328,17 @@ sealed class Fixture : HttpMessageHandler
     public void NetworkFailure(string uri) => fixtures[uri] = () =>
         throw new HttpRequestException(HttpRequestError.SecureConnectionError, "Fixture HTTPS handshake failed.");
 
-    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
     {
         OnRequest?.Invoke();
         token.ThrowIfCancellationRequested();
         var path = request.RequestUri!.AbsoluteUri;
         Seen.Add(path);
+        if (request.Method == HttpMethod.Post && request.Content != null)
+            Forms[path] = await request.Content.ReadAsStringAsync(token);
         var response = fixtures.TryGetValue(path, out var create) ? create() : new(HttpStatusCode.NotFound);
         response.RequestMessage = request;
-        return Task.FromResult(response);
+        return response;
     }
 
     private sealed class NetworkBody(byte[] data) : MemoryStream(data)

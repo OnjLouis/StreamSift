@@ -29,7 +29,7 @@ public sealed class SearchSequence(HttpClient client, string? cacheDirectory = n
         input = StationText(input);
         // A bare FM frequency such as 104.3 can also parse as a shortened IPv4 address.
         if (input.Length is >= 4 and <= 6 && input.Count(c => c == '.') == 1 &&
-            input.All(c => char.IsAsciiDigit(c) || c == '.') &&
+            input.All(c => Ascii.IsDigit(c) || c == '.') &&
             decimal.TryParse(input, System.Globalization.NumberStyles.AllowDecimalPoint,
                 System.Globalization.CultureInfo.InvariantCulture, out var frequency) && frequency is >= 76 and <= 108)
             return true;
@@ -50,7 +50,7 @@ public sealed class SearchSequence(HttpClient client, string? cacheDirectory = n
     }
 
     public async Task<SearchRun> FindStationAsync(string name, CancellationToken cancel,
-        IEnumerable<string>? recentSearches = null)
+        IEnumerable<string>? recentSearches = null, bool preferHttpsPlayback = false)
     {
         if (!CanSearchStation(name)) throw new ArgumentException("Invalid station name.");
         SearchResult? fromWebsite = null;
@@ -65,7 +65,7 @@ public sealed class SearchSequence(HttpClient client, string? cacheDirectory = n
             }
             catch (OperationCanceledException) when (!cancel.IsCancellationRequested) { }
         }
-        var result = await new DirectoryDiscovery(client, cacheDirectory).FindByNameAsync(name, cancel).ConfigureAwait(false);
+        var result = await new DirectoryDiscovery(client, cacheDirectory).FindByNameAsync(name, cancel, preferHttpsPlayback).ConfigureAwait(false);
         return new SearchRun(result with { Requests = result.Requests + (fromWebsite?.Requests ?? 0),
             Unreachable = result.Unreachable + (fromWebsite?.Unreachable ?? 0),
             LimitReached = result.LimitReached || (fromWebsite?.LimitReached ?? false) },

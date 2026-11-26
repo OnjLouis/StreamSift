@@ -3,7 +3,8 @@ import Darwin
 import UniformTypeIdentifiers
 
 @MainActor final class StreamSiftApp: NSObject, NSApplicationDelegate, NSWindowDelegate, NSComboBoxDelegate,
-                                     NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation {
+                                     NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation, NSToolbarDelegate,
+                                     NSToolbarItemValidation {
     private let projectURL = URL(string: "https://github.com/OnjLouis/StreamSift")!
     private let window = KeyboardWindow(contentRect: NSRect(x: 0, y: 0, width: 730, height: 505),
                                         styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -13,6 +14,8 @@ import UniformTypeIdentifiers
     private let findDirectory = NSButton(title: "Look Up in Radio Directory", target: nil, action: nil)
     private let cancel = NSButton(title: "Cancel", target: nil, action: nil)
     private let table = StreamTable()
+    private let actionsToolbar = NSToolbar(identifier: "StreamSift.Actions")
+    private let toolbarVisibilityKey = "ShowToolbar"
     private let details = DetailTable()
     private let status = readOnlyText("Status", hint: "Read the latest search or action result.")
     private let defaults = UserDefaults.standard
@@ -22,6 +25,7 @@ import UniformTypeIdentifiers
     private weak var reviewPanel: HelpPanel?
     private var preferences = Preferences()
     private var startSound: NSSound?
+    private var searchPulseTimer: Timer?
     private var doneSound: NSSound?
     private var failureSound: NSSound?
     private var stations: [Station] = []
@@ -29,6 +33,16 @@ import UniformTypeIdentifiers
     private var fileIndexResults = false
     private var resultView = ResultView()
     private var resultQuery = ""
+    private lazy var favourites = Favourites.read(from: defaults)
+    private var showingFavourites = false
+    private var favouriteView = ResultView()
+    private var searchSelection = Set<String>()
+    private var favouriteSelection = Set<String>()
+    private var searchStatus = "Ready."
+    private var searchResultQuery = ""
+    private var favouriteResultQuery = ""
+    private var lastPlayed: String?
+    private var transferringFavourites = false
     private var lastSearch: (input: String, mode: SearchMode)?
     private var names: [String] = []
     private var job: ScanJob?
@@ -53,6 +67,7 @@ import UniformTypeIdentifiers
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationWillTerminate(_ notification: Notification) {
+        stopSearchPulse()
         rememberLastResults()
         job?.cancel()
     }
@@ -80,9 +95,7 @@ import UniformTypeIdentifiers
         }
         window.keyOrder = { [weak self] in self?.mainKeyOrder ?? [] }
         window.cancel = { [weak self] in
-            guard self?.job != nil else { return false }
-            self?.cancelSearch()
-            return true
+            self?.escapeMainWindow() ?? false
         }
         let caption = NSTextField(labelWithString: "Web address or station name:")
         caption.setAccessibilityServesAsTitleForUIElements([address])
@@ -152,10 +165,22 @@ import UniformTypeIdentifiers
         content.spacing = 10
         content.edgeInsets = NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
         window.contentView = content
+        actionsToolbar.delegate = self
+        actionsToolbar.displayMode = .iconAndLabel
+        window.toolbarStyle = .unifiedCompact
+        window.toolbar = actionsToolbar
+        actionsToolbar.isVisible = defaults.object(forKey: toolbarVisibilityKey) == nil || defaults.bool(forKey: toolbarVisibilityKey)
         for view in [entry, listView, detailView, statusView] {
             view.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -28).isActive = true
         }
-        detailView.heightAnchor.constraint(equalToConstant: 118).isActive = true
+        searchButtons.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor, constant: -28).isActive = true
+        let preferredDetailHeight = detailView.heightAnchor.constraint(equalToConstant: 118)
+        preferredDetailHeight.priority = .defaultLow
+        NSLayoutConstraint.activate([
+            listView.heightAnchor.constraint(greaterThanOrEqualToConstant: 112),
+            detailView.heightAnchor.constraint(greaterThanOrEqualToConstant: 60),
+            preferredDetailHeight
+        ])
         statusView.heightAnchor.constraint(equalToConstant: 53).isActive = true
         listView.setContentHuggingPriority(.defaultLow, for: .vertical)
         window.initialFirstResponder = address
@@ -215,6 +240,7 @@ import UniformTypeIdentifiers
             item("Refresh Results", #selector(refreshResults), "r"), .separator(),
             item("Copy Addresses", #selector(copyAddress)),
             item("Play Result", #selector(previewStream)),
+            item("Play Random", #selector(playRandom), "r", modifiers: [.command, .shift]),
             item("Open in Browser", #selector(openFocusedAddressInBrowser), "\r", modifiers: .option),
             item("Save and Open in Default Player", #selector(openDefaultPlayer)), .separator(),
             item("Go to Address", #selector(focusAddress), "1"),
@@ -226,6 +252,14 @@ import UniformTypeIdentifiers
             item("Find Next", #selector(findNextResult), "g"),
             item("Find Previous", #selector(findPreviousResult), "g", modifiers: [.command, .shift])
         ])
+        _ = section("Favourites", [
+            item("Show Favourites", #selector(toggleFavourites), "b", modifiers: [.command, .shift]),
+            item("Add to Favourites", #selector(toggleFavourite), "d"),
+            .separator(),
+            item("Import Favourites...", #selector(importFavourites), "i", modifiers: [.command, .shift]),
+            item("Export Favourites...", #selector(exportFavourites), "e", modifiers: [.command, .shift])
+        ])
+        _ = section("View", [item("Show Toolbar", #selector(toggleToolbar))])
         NSApp.windowsMenu = section("Window", [
             NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"),
             NSMenuItem(title: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
@@ -259,17 +293,20 @@ import UniformTypeIdentifiers
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if let command = ToolbarAction.allCases.first(where: { $0.selector == menuItem.action }) {
+            let state = toolbarState(command)
+            menuItem.title = state.title
+            return state.enabled
+        }
         switch menuItem.action {
+        case #selector(toggleToolbar):
+            menuItem.state = actionsToolbar.isVisible ? .on : .off
+            return window.isKeyWindow && window.attachedSheet == nil
         case #selector(savePlaylist), #selector(copyAddress), #selector(openDefaultPlayer), #selector(focusDetails):
             return selected != nil && window.isKeyWindow && window.attachedSheet == nil
         case #selector(openFocusedAddressInBrowser):
             return (window.focusedView === details ? details.selectedDetail?.address != nil : table.selectedRowIndexes.count == 1) &&
                 window.isKeyWindow && window.attachedSheet == nil
-        case #selector(previewStream):
-            let single = table.selectedRowIndexes.count == 1
-            let tracks = tracksSelected
-            menuItem.title = tracks ? (single ? "Play Track" : "Play Selected Tracks") : "Play Result"
-            return (single || tracks) && window.isKeyWindow && window.attachedSheet == nil
         case #selector(openStreamInBrowser):
             return table.selectedRowIndexes.count == 1 && window.isKeyWindow && window.attachedSheet == nil
         case #selector(activateDetail):
@@ -285,13 +322,16 @@ import UniformTypeIdentifiers
         case #selector(focusStatus):
             return window.isKeyWindow && window.attachedSheet == nil
         case #selector(focusStreams):
+            menuItem.title = showingFavourites ? "Go to Favourites" : "Go to Results"
             return !stations.isEmpty && window.isKeyWindow && window.attachedSheet == nil
-        case #selector(showResultFilter):
-            return job == nil && !allStations.isEmpty && window.isKeyWindow && window.attachedSheet == nil
         case #selector(showResultFind), #selector(findNextResult), #selector(findPreviousResult):
             return job == nil && !stations.isEmpty && window.isKeyWindow && window.attachedSheet == nil
         case #selector(refreshResults):
-            return job == nil && lastSearch != nil && !historyOpen && window.isKeyWindow && window.attachedSheet == nil
+            return !showingFavourites && job == nil && lastSearch != nil && !historyOpen && window.isKeyWindow && window.attachedSheet == nil
+        case #selector(importFavourites):
+            return favouritesCommandsAvailable && !transferringFavourites
+        case #selector(exportFavourites):
+            return favouritesCommandsAvailable && !transferringFavourites && !favourites.isEmpty
         case #selector(openPlaylistFolder):
             return window.isKeyWindow && window.attachedSheet == nil
         case #selector(clearHistory):
@@ -319,19 +359,21 @@ import UniformTypeIdentifiers
 
     private func streamLine(at row: Int) -> String? {
         guard stations.indices.contains(row) else { return nil }
-        if fileIndexResults { return FileResultColumn.reviewLine(for: stations[row], named: names[row]) }
+        if visibleFileColumns && stations[row].isTrack == true {
+            return FileResultColumn.reviewLine(for: stations[row], named: names[row])
+        }
         return stations[row].listLabel(named: names[row])
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard stations.indices.contains(row) else { return nil }
         let column = tableColumn.flatMap { FileResultColumn(rawValue: $0.identifier.rawValue) }
-        let text = fileIndexResults ? (column ?? .name).value(for: stations[row], named: names[row])
+        let text = visibleFileColumns ? (column ?? .name).value(for: stations[row], named: names[row])
             : stations[row].listLabel(named: names[row])
         let cell = NSTextField(labelWithString: text)
         cell.lineBreakMode = .byTruncatingMiddle
         cell.toolTip = text
-        if fileIndexResults && column == .size { cell.alignment = .right }
+        if visibleFileColumns && column == .size { cell.alignment = .right }
         return cell
     }
 
@@ -349,6 +391,7 @@ import UniformTypeIdentifiers
         find.isEnabled = job == nil
         findDirectory.isEnabled = job == nil
         cancel.isEnabled = job != nil
+        actionsToolbar.validateVisibleItems()
         let controls = mainKeyOrder
         for (index, view) in controls.enumerated() { view.nextKeyView = controls[(index + 1) % controls.count] }
     }
@@ -372,21 +415,22 @@ import UniformTypeIdentifiers
     private func rememberLastResults() {
         guard !allStations.isEmpty, let lastSearch else { return }
         let row = table.selectedRow
+        let selection = showingFavourites ? searchSelection.first : stations.indices.contains(row) ? stations[row].url : nil
         LastResults.capture(input: lastSearch.input, mode: lastSearch.mode, stations: allStations,
-                            view: resultView, selection: stations.indices.contains(row) ? stations[row].url : nil)?
+                            view: resultView, selection: selection)?
             .save(to: defaults)
     }
 
-    private func load(_ found: [Station], fileIndex: Bool = false) {
+    private func load(_ found: [Station], fileIndex: Bool = false, preferListedOrder: Bool = false) {
         allStations = found
         fileIndexResults = fileIndex
-        resultView = ResultView.forSearch(fileIndex: fileIndex)
+        resultView = ResultView.forSearch(fileIndex: fileIndex, preferListedOrder: preferListedOrder)
         resultQuery = ""
         render(resultView.apply(found), preserving: [])
     }
 
-    private func render(_ found: [Station], preserving selection: Set<String>) {
-        guard stations != found || table.showsFileColumns != fileIndexResults else { refreshNavigation(); return }
+    private func render(_ found: [Station], preserving selection: Set<String>, switching: Bool = false) {
+        guard switching || stations != found || table.showsFileColumns != visibleFileColumns else { refreshNavigation(); return }
         stations = found
         func group(_ row: Station) -> [String] { [row.name, row.format, String(row.bitrate ?? -1)] }
         let counts = Dictionary(grouping: found, by: group)
@@ -394,7 +438,7 @@ import UniformTypeIdentifiers
             guard counts[group(row), default: []].count > 1, let url = URL(string: row.url) else { return row.name }
             return "\(row.name) (\(url.host ?? "")\(url.path))"
         }
-        table.setFileColumns(fileIndexResults)
+        table.setFileColumns(visibleFileColumns)
         table.reloadData()
         if !found.isEmpty {
             let kept = IndexSet(found.indices.filter { selection.contains(found[$0].url) })
@@ -405,16 +449,18 @@ import UniformTypeIdentifiers
     }
 
     @objc private func showResultFilter() {
-        guard !allStations.isEmpty, window.attachedSheet == nil else { return }
-        let formats = ResultView.formats(allStations)
+        let source = activeResults
+        let view = activeView
+        guard !source.isEmpty, window.attachedSheet == nil else { return }
+        let formats = ResultView.formats(source)
         let format = NSPopUpButton()
         format.addItems(withTitles: ["All formats"] + formats)
-        format.selectItem(at: resultView.format.flatMap { formats.firstIndex(of: $0) }.map { $0 + 1 } ?? 0)
+        format.selectItem(at: view.format.flatMap { formats.firstIndex(of: $0) }.map { $0 + 1 } ?? 0)
         let sort = NSPopUpButton()
-        let tracks = allStations.contains { $0.isTrack == true }
-        let orders = ResultView.availableOrders(allStations)
+        let tracks = source.contains { $0.isTrack == true }
+        let orders = ResultView.availableOrders(source)
         sort.addItems(withTitles: orders.map { $0.label(tracks: tracks) })
-        sort.selectItem(at: orders.firstIndex(of: resultView.order) ?? 0)
+        sort.selectItem(at: orders.firstIndex(of: view.order) ?? 0)
         let sheet = ResultCommandSheet(title: "Filter and Sort", action: "Apply", fields: [
             ("Format", format, "Show all formats or a format found in the current search."),
             ("Sort by", sort, tracks ? "Choose listed order, track name, date modified or file size where listed. Missing values appear last."
@@ -424,10 +470,11 @@ import UniformTypeIdentifiers
             guard let self else { return }
             let index = format.indexOfSelectedItem - 1
             let sortIndex = sort.indexOfSelectedItem
-            resultView = ResultView(format: formats.indices.contains(index) ? formats[index] : nil,
+            let changed = ResultView(format: formats.indices.contains(index) ? formats[index] : nil,
                                     order: orders.indices.contains(sortIndex) ? orders[sortIndex] : .search)
-            render(resultView.apply(allStations), preserving: Set(selectedStations.map(\.url)))
-            setStatus("Showing \(stations.count) of \(allStations.count) \(tracks ? "tracks" : "streams").")
+            if showingFavourites { favouriteView = changed } else { resultView = changed }
+            render(changed.apply(activeResults), preserving: Set(selectedStations.map(\.url)))
+            setStatus("Showing \(stations.count) of \(activeResults.count) \(showingFavourites ? "favourites" : tracks ? "tracks" : "streams").")
             window.makeFirstResponder(table)
         }
     }
@@ -483,7 +530,7 @@ import UniformTypeIdentifiers
     @objc private func findInDirectory() { startSearch(mode: .directory) }
 
     @objc private func refreshResults() {
-        guard let lastSearch, !historyOpen else { return }
+        guard let lastSearch, !historyOpen, !showingFavourites else { return }
         startSearch(mode: lastSearch.mode, refreshInput: lastSearch.input)
     }
 
@@ -499,6 +546,7 @@ import UniformTypeIdentifiers
                 guard let self, job === running, !isCancelling else { return }
                 setStatus("Trying another method. " + next.starting)
             }) { [weak self] result in self?.finished(result, mode: mode, input: input, refreshing: refreshing) }
+            if showingFavourites { toggleFavourites() }
             isCancelling = false
             job = running
             lastSearch = (input, mode)
@@ -507,7 +555,11 @@ import UniformTypeIdentifiers
             window.makeFirstResponder(cancel)
             if refreshing || newInput != nil { address.stringValue = input }
             setStatus(refreshing ? "Refreshing results..." : mode.starting)
-            if preferences.sounds { startSound?.stop(); startSound?.play() }
+            if preferences.sounds, startSound != nil {
+                playSearchPulse()
+                searchPulseTimer = Timer.scheduledTimer(timeInterval: 2, target: self,
+                    selector: #selector(playSearchPulse), userInfo: nil, repeats: true)
+            }
         } catch {
             setStatus(error.localizedDescription)
             window.makeFirstResponder(address)
@@ -517,10 +569,32 @@ import UniformTypeIdentifiers
     @objc private func cancelSearch() {
         guard let job, !isCancelling else { return }
         isCancelling = true
+        stopSearchPulse()
         job.cancel()
     }
 
+    private func escapeMainWindow() -> Bool {
+        guard !historyOpen, window.attachedSheet == nil else { return false }
+        if job != nil { cancelSearch(); return true }
+        guard showingFavourites else { return false }
+        toggleFavourites()
+        return true
+    }
+
+    @objc private func playSearchPulse() {
+        guard preferences.sounds, job != nil, !isCancelling else { return }
+        startSound?.stop()
+        startSound?.play()
+    }
+
+    private func stopSearchPulse() {
+        searchPulseTimer?.invalidate()
+        searchPulseTimer = nil
+        startSound?.stop()
+    }
+
     private func finished(_ result: Result<SearchResult, Error>, mode: SearchMode, input: String, refreshing: Bool) {
+        stopSearchPulse()
         let focused = window.focusedView
         let moveFocus = focused === cancel || focused === address || focused === find || focused === findDirectory
         job = nil
@@ -539,10 +613,10 @@ import UniformTypeIdentifiers
                     let sameResultType = fileIndexResults == (found.entryWasFileIndex == true)
                     fileIndexResults = found.entryWasFileIndex == true
                     resultView = sameResultType ? resultView.retainingAvailable(in: allStations, fileIndex: fileIndexResults)
-                        : ResultView.forSearch(fileIndex: fileIndexResults)
+                        : ResultView.forSearch(fileIndex: fileIndexResults, preferListedOrder: found.preferListedOrder == true)
                     render(resultView.apply(allStations), preserving: Set(selectedStations.map(\.url)))
                 } else {
-                    load(found.stations, fileIndex: found.entryWasFileIndex == true)
+                    load(found.stations, fileIndex: found.entryWasFileIndex == true, preferListedOrder: found.preferListedOrder == true)
                 }
                 rememberLastResults()
                 let prefix = found.stations.isEmpty && (found.attempts ?? 0) > 1 ? "Automatic search: " : (found.method ?? mode).resultPrefix
@@ -587,6 +661,7 @@ import UniformTypeIdentifiers
 
     @objc private func reset() {
         guard job == nil else { return }
+        if showingFavourites { toggleFavourites() }
         LastResults.clear(in: defaults)
         lastSearch = nil
         if address.indexOfSelectedItem >= 0 { address.deselectItem(at: address.indexOfSelectedItem) }
@@ -604,6 +679,9 @@ import UniformTypeIdentifiers
         menu.addItem(item("Review Text...", #selector(reviewStreamLine), functionFour, modifiers: []))
         menu.addItem(item("Save Playlist...", #selector(savePlaylist), "s"))
         menu.addItem(item("Save and Open in Default Player", #selector(openDefaultPlayer), "\r", modifiers: .shift))
+        if table.selectedRowIndexes.count == 1 {
+            menu.addItem(item(favouriteActionTitle, #selector(toggleFavourite), "d"))
+        }
         return menu
     }
 
@@ -724,8 +802,9 @@ import UniformTypeIdentifiers
         } catch { showMessage("Could Not Open Playlist Folder", error.localizedDescription) }
     }
 
-    @objc private func previewStream() {
-        let selection = selectedStations
+    @objc private func previewStream() { play(selectedStations) }
+
+    private func play(_ selection: [Station], random: Bool = false) {
         guard let first = selection.first, window.attachedSheet == nil else { return }
         if selection.count > 1 && !selection.allSatisfy({ $0.isTrack == true }) {
             setStatus("Select one result to play it, or press Shift+Return to save and open the selection.")
@@ -761,7 +840,9 @@ import UniformTypeIdentifiers
                     self?.showMessage("Could Not Play Result", "The player could not open the selection. Choose another player in Settings.")
                 } else {
                     let player = target.player?.displayName(customPath: target.app.path) ?? "your default playlist player"
-                    self?.setStatus(selection.count == 1 ? "Sent to \(player)." : "Sent \(selection.count) tracks to \(player).")
+                    if selection.count == 1 { self?.lastPlayed = first.url }
+                    self?.setStatus(random ? "Sent \(first.name) to \(player)." :
+                        selection.count == 1 ? "Sent to \(player)." : "Sent \(selection.count) tracks to \(player).")
                     if usesPlaylist {
                         DispatchQueue.main.asyncAfter(deadline: .now() + PlaybackHandoff.retention + 1) {
                             _ = try? PlaybackHandoff.prune()
@@ -839,7 +920,9 @@ import UniformTypeIdentifiers
             help = (row.label + " Help", ContextGuide.detail(row, canSearch: details.canSearch))
         } else if focus === table {
             help = ("Results Help", ContextGuide.streams(selected: table.selectedRowIndexes.count, tracks: tracksSelected,
-                                                        fileColumns: fileIndexResults))
+                                                        fileColumns: visibleFileColumns) +
+                "\nCommand+D adds or removes a favourite. Command+Shift+B switches views. Command+Shift+R plays a random visible result." +
+                (showingFavourites ? "\nEscape returns to search results." : ""))
         } else {
             let text = focus?.accessibilityHelp().flatMap { $0.isEmpty ? nil : $0 } ??
                 "Enter a website address and press Return. When streams are found, use the results table to copy or save a stream."
@@ -883,6 +966,214 @@ import UniformTypeIdentifiers
                 }
             } catch {
                 if !automatic { showMessage("Check for Updates", error.localizedDescription) }
+            }
+        }
+    }
+}
+
+extension StreamSiftApp {
+    private enum ToolbarAction: String, CaseIterable {
+        case play, random, filter, favourites, saveFavourite
+
+        var identifier: NSToolbarItem.Identifier { NSToolbarItem.Identifier(rawValue) }
+
+        var selector: Selector {
+            switch self {
+            case .play: return #selector(StreamSiftApp.previewStream)
+            case .random: return #selector(StreamSiftApp.playRandom)
+            case .filter: return #selector(StreamSiftApp.showResultFilter)
+            case .favourites: return #selector(StreamSiftApp.toggleFavourites)
+            case .saveFavourite: return #selector(StreamSiftApp.toggleFavourite)
+            }
+        }
+
+        var shortcut: String {
+            switch self {
+            case .play: return "Return"
+            case .random: return "Command+Shift+R"
+            case .filter: return "Command+L"
+            case .favourites: return "Command+Shift+B"
+            case .saveFavourite: return "Command+D"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .play: return "play.fill"
+            case .random: return "shuffle"
+            case .filter: return "line.3.horizontal.decrease.circle"
+            case .favourites: return "star"
+            case .saveFavourite: return "plus.circle"
+            }
+        }
+    }
+
+    private func toolbarState(_ action: ToolbarAction) -> (title: String, enabled: Bool) {
+        let single = table.selectedRowIndexes.count == 1
+        let available = window.isKeyWindow && window.attachedSheet == nil
+        switch action {
+        case .play:
+            let tracks = tracksSelected
+            return (tracks ? (single ? "Play Track" : "Play Selected Tracks") : "Play Result", available && (single || tracks))
+        case .random:
+            return ("Play Random", favouritesCommandsAvailable && !stations.isEmpty)
+        case .filter:
+            return ("Filter and Sort...", available && job == nil && !activeResults.isEmpty)
+        case .favourites:
+            return (showingFavourites ? "Return to Search Results" : "Show Favourites", favouritesCommandsAvailable)
+        case .saveFavourite:
+            return (favouriteActionTitle, favouritesCommandsAvailable && single)
+        }
+    }
+
+    @objc private func toggleToolbar() {
+        actionsToolbar.isVisible.toggle()
+        defaults.set(actionsToolbar.isVisible, forKey: toolbarVisibilityKey)
+        actionsToolbar.validateVisibleItems()
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        ToolbarAction.allCases.map(\.identifier) + [.space]
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [ToolbarAction.play.identifier, ToolbarAction.random.identifier, ToolbarAction.filter.identifier,
+         .space, ToolbarAction.favourites.identifier, ToolbarAction.saveFavourite.identifier]
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar willBeInserted: Bool) -> NSToolbarItem? {
+        guard let action = ToolbarAction(rawValue: identifier.rawValue) else { return nil }
+        let item = NSToolbarItem(itemIdentifier: identifier)
+        item.image = NSImage(systemSymbolName: action.symbol, accessibilityDescription: nil)
+        item.target = self
+        item.action = action.selector
+        item.isEnabled = validateToolbarItem(item)
+        return item
+    }
+
+    func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
+        guard let action = ToolbarAction(rawValue: item.itemIdentifier.rawValue) else { return false }
+        let state = toolbarState(action)
+        if action == .saveFavourite && item.label != state.title {
+            item.image = NSImage(systemSymbolName: selectedIsFavourite ? "minus.circle" : action.symbol,
+                                 accessibilityDescription: nil)
+        }
+        item.label = state.title
+        item.toolTip = "\(state.title) (\(action.shortcut))"
+        return state.enabled
+    }
+}
+
+extension StreamSiftApp {
+    private var activeResults: [Station] { showingFavourites ? favourites : allStations }
+    private var activeView: ResultView { showingFavourites ? favouriteView : resultView }
+    private var visibleFileColumns: Bool {
+        showingFavourites ? favourites.contains { $0.isTrack == true } : fileIndexResults
+    }
+    private var favouritesCommandsAvailable: Bool {
+        job == nil && !historyOpen && window.isKeyWindow && window.attachedSheet == nil
+    }
+    private var selectedIsFavourite: Bool {
+        selected.map { row in favourites.contains { $0.url == row.url } } == true
+    }
+
+    private var favouriteActionTitle: String { selectedIsFavourite ? "Remove from Favourites" : "Add to Favourites" }
+
+    @objc private func toggleFavourites() {
+        guard job == nil else { return }
+        let selection = Set(selectedStations.map(\.url))
+        if showingFavourites {
+            favouriteSelection = selection
+            favouriteResultQuery = resultQuery
+        } else {
+            searchSelection = selection
+            searchResultQuery = resultQuery
+            searchStatus = status.string
+        }
+        showingFavourites.toggle()
+        resultQuery = showingFavourites ? favouriteResultQuery : searchResultQuery
+        table.setAccessibilityLabel(showingFavourites ? "Favourites" : "Results")
+        render(activeView.apply(activeResults), preserving: showingFavourites ? favouriteSelection : searchSelection, switching: true)
+        let favouriteStatus = favourites.isEmpty ? "No favourites." : "Showing \(stations.count) of \(favourites.count) favourites."
+        setStatus(showingFavourites ? favouriteStatus + " Press Escape to return to search results." : searchStatus)
+        window.makeFirstResponder(stations.isEmpty ? status : table)
+    }
+
+    @objc private func toggleFavourite() {
+        guard favouritesCommandsAvailable, table.selectedRowIndexes.count == 1, let row = selected else { return }
+        guard Favourites.canSave(row) else {
+            showMessage("Add to Favourites", "Choose a station or track with a stable public audio address.")
+            return
+        }
+        let remove = favourites.contains { $0.url == row.url }
+        let next = remove ? favourites.filter { $0.url != row.url } : Favourites.merge(favourites, with: [row])
+        guard next != favourites else { showMessage("Favourites", FavouriteError.full.localizedDescription); return }
+        do {
+            try saveFavourites(next)
+            setStatus(remove ? "Removed from Favourites." : "Added to Favourites.")
+        } catch { showMessage("Favourites", error.localizedDescription) }
+    }
+
+    private func saveFavourites(_ next: [Station]) throws {
+        try Favourites.save(next, to: defaults)
+        favourites = next
+        favouriteView = favouriteView.retainingAvailable(in: next)
+        if showingFavourites {
+            let hadFocus = window.focusedView === table || window.focusedView === details
+            render(favouriteView.apply(next), preserving: Set(selectedStations.map(\.url)))
+            if stations.isEmpty && hadFocus { window.makeFirstResponder(status) }
+        } else { refreshNavigation() }
+    }
+
+    @objc private func playRandom() {
+        guard favouritesCommandsAvailable, let row = Favourites.random(in: stations, avoiding: lastPlayed) else { return }
+        play([row], random: true)
+    }
+
+    @objc private func importFavourites() {
+        guard favouritesCommandsAvailable, !transferringFavourites else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Import Favourites"
+        panel.allowedContentTypes = ["m3u8", "m3u"].compactMap { UTType(filenameExtension: $0) }
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            transferringFavourites = true
+            DispatchQueue.global(qos: .userInitiated).async {
+                let converted = Result { try Favourites.importPlaylist(url) }
+                DispatchQueue.main.async {
+                    self.transferringFavourites = false
+                    do {
+                        let list = try converted.get()
+                        let updated = Favourites.merge(self.favourites, with: list.stations)
+                        let added = updated.count - self.favourites.count
+                        if added > 0 { try self.saveFavourites(updated) }
+                        self.setStatus(list.summary(added: added))
+                    } catch { self.showMessage("Import Favourites", error.localizedDescription) }
+                }
+            }
+        }
+    }
+
+    @objc private func exportFavourites() {
+        guard favouritesCommandsAvailable, !transferringFavourites, !favourites.isEmpty else { return }
+        let panel = NSSavePanel()
+        panel.title = "Export Favourites"
+        panel.nameFieldStringValue = "Favourites.m3u8"
+        panel.allowedContentTypes = [UTType(filenameExtension: "m3u8")].compactMap { $0 }
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            transferringFavourites = true
+            let entries = favourites
+            DispatchQueue.global(qos: .userInitiated).async {
+                let written = Result { try Favourites.exportPlaylist(entries, to: url) }
+                DispatchQueue.main.async {
+                    self.transferringFavourites = false
+                    switch written {
+                    case .success: self.setStatus("Favourites exported.")
+                    case .failure(let error): self.showMessage("Export Favourites", error.localizedDescription)
+                    }
+                }
             }
         }
     }

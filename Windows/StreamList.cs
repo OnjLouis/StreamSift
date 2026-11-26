@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace StreamSift;
 
-internal enum StreamAction { Copy = 1, Save, Foobar, OpenDefault, Preview, SelectAll, OpenBrowser, Review }
+internal enum StreamAction { Copy = 1, Save, Foobar, OpenDefault, Preview, SelectAll, OpenBrowser, Review, Favourite }
 
 internal sealed class StreamList : ListView
 {
@@ -176,9 +176,14 @@ internal sealed class StreamList : ListView
         bool single = SelectedItems.Count == 1;
         var row = (FocusedItem is { Selected: true } focused ? focused : SelectedItems[0]).Bounds;
         var position = screen ?? PointToScreen(new Point(row.Left + 10, row.Bottom));
-        var picked = (StreamAction)NativeRowMenu.Show(owner, position, MenuItems(single, TracksSelected));
+        var commands = MenuItems(single, TracksSelected);
+        if (single && FavouriteCaption is { } caption)
+            commands = [.. commands, ((int)StreamAction.Favourite, caption + "\tCtrl+D", true)];
+        var picked = (StreamAction)NativeRowMenu.Show(owner, position, commands);
         if (picked != 0) Command?.Invoke(picked);
     }
+
+    internal string? FavouriteCaption;
 
     internal static (int Id, string Caption, bool Enabled)[] MenuItems(bool single, bool tracks = false) =>
     [
@@ -199,11 +204,19 @@ internal sealed class FileResultItem : ListViewItem
     internal FileResultItem(Station station, string displayName)
     {
         DisplayName = displayName;
+        Tag = station;
+        if (!station.IsTrack)
+        {
+            Text = displayName + ", Live stream, " + station.Format +
+                (station.Bitrate is int bitrate ? $", {bitrate} kbps" : "") +
+                (station.Listeners is int listeners ? ", " + ResultView.ListenerLabel(listeners) : "");
+            SubItems.AddRange([station.Format, "", ""]);
+            return;
+        }
         var size = station.FileSizeLabel ?? "Not listed";
         var modified = station.DateModifiedLabel ?? "Not listed";
         Text = $"{displayName}, {station.Format}, Size {size}, Date modified {modified}";
         SubItems.AddRange([station.Format, size, modified]);
-        Tag = station;
     }
 }
 

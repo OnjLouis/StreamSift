@@ -26,8 +26,8 @@ struct ResultView {
     var format: String?
     var order = ResultOrder.search
 
-    static func forSearch(fileIndex: Bool) -> ResultView {
-        ResultView(order: fileIndex ? .nameAscending : .search)
+    static func forSearch(fileIndex: Bool, preferListedOrder: Bool = false) -> ResultView {
+        ResultView(order: fileIndex && !preferListedOrder ? .nameAscending : .search)
     }
 
     static func formats(_ stations: [Station]) -> [String] {
@@ -100,7 +100,7 @@ struct ResultView {
             let index = (start + (backwards ? -step : step) + size) % size
             let row = stations[index]
             let values = [row.name, row.format, row.url, row.bitrate.map { "\($0) kbps" } ?? "",
-                          row.listeners.map(listenerLabel) ?? ""]
+                          row.listeners.map(listenerLabel) ?? "", row.scanTitle ?? ""]
             if values.contains(where: { $0.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil }) {
                 return index
             }

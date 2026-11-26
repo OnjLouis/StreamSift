@@ -36,7 +36,7 @@ public static class PublicNetwork
     private static bool IsDiFmSubscriberRoute(Uri address)
     {
         var label = address.IdnHost.Split('.')[0];
-        return (label.StartsWith("prem", StringComparison.Ordinal) && label.Length > 4 && label[4..].All(char.IsAsciiDigit)) ||
+        return (label.StartsWith("prem", StringComparison.Ordinal) && label.Length > 4 && label[4..].All(Ascii.IsDigit)) ||
             Uri.UnescapeDataString(address.AbsolutePath).StartsWith("/premium", StringComparison.OrdinalIgnoreCase) ||
             address.Query.TrimStart('?').Split('&').Any(field =>
                 Uri.UnescapeDataString(field.Split('=', 2)[0]).Equals("listen_key", StringComparison.OrdinalIgnoreCase));
@@ -68,18 +68,31 @@ public static class PublicNetwork
             !(b[0] == 0x3f && b[1] == 0xff);
     }
 
-    public static HttpClient CreateClient() => new(new SocketsHttpHandler
+    public static HttpClient CreateClient() => CreateClient(readStreamTitles: false);
+
+    public static HttpClient CreateClient(bool readStreamTitles)
     {
-        AllowAutoRedirect = false,
-        UseCookies = false,
-        UseProxy = false,
-        AutomaticDecompression = DecompressionMethods.All,
-        ConnectTimeout = TimeSpan.FromSeconds(5),
-        PooledConnectionLifetime = TimeSpan.FromMinutes(2),
-        MaxResponseHeadersLength = 32,
-        MaxResponseDrainSize = 0,
-        ConnectCallback = Connect
-    }) { Timeout = Timeout.InfiniteTimeSpan };
+        var client = new HttpClient(new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            UseCookies = false,
+            UseProxy = false,
+            AutomaticDecompression = DecompressionMethods.All,
+            ConnectTimeout = TimeSpan.FromSeconds(5),
+            PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+            MaxResponseHeadersLength = 32,
+            MaxResponseDrainSize = 0,
+#if NET6_0
+            SslOptions = new System.Net.Security.SslClientAuthenticationOptions
+            {
+                EnabledSslProtocols = System.Security.Authentication.SslProtocols.Tls12
+            },
+#endif
+            ConnectCallback = Connect
+        }) { Timeout = Timeout.InfiniteTimeSpan };
+        if (readStreamTitles) client.DefaultRequestHeaders.TryAddWithoutValidation(IcyScanTitle.RequestHeader, "1");
+        return client;
+    }
 
     internal static async Task<bool> ArePublicMediaHostsAsync(string[] hosts, CancellationToken token)
     {

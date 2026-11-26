@@ -77,17 +77,20 @@ struct Station: Codable, Equatable {
     let url: String
     let format: String
     let bitrate: Int?
-    let foundOn: String
+    var foundOn: String
     var listeners: Int?
     var isVideo: Bool?
+    var isHls: Bool?
     var isTrack: Bool?
     var dateModified: String?
     var dateModifiedLabel: String?
     var fileSizeBytes: Int64?
     var fileSizeLabel: String?
+    var scanTitle: String?
 
     func listLabel(named displayName: String) -> String {
-        [displayName, isTrack == true ? "Track" : nil, format, bitrate.map { "\($0) kbps" }, listeners.map(ResultView.listenerLabel)]
+        [displayName, isTrack == true ? "Track" : nil, format, bitrate.map { "\($0) kbps" }, listeners.map(ResultView.listenerLabel),
+         scanTitle.map { "Playing, \($0)" }]
             .compactMap { $0 }.joined(separator: ", ")
     }
 }
@@ -95,6 +98,8 @@ struct Station: Codable, Equatable {
 struct SearchResult: Decodable {
     let entryWasWebsite: Bool?
     let entryWasFileIndex: Bool?
+    let preferListedOrder: Bool?
+    let listingNotice: String?
     let stations: [Station]
     let requests: Int
     let unreachable: Int
@@ -107,13 +112,14 @@ struct SearchResult: Decodable {
         let count = stations.count
         let caption: String
         switch count {
-        case 0 where entryWasFileIndex == true: caption = "No supported audio files listed."
+        case 0 where entryWasFileIndex == true: caption = listingNotice ?? "No supported audio files listed."
         case 0: caption = "No playable streams or files found."
         case 1 where entryWasFileIndex == true: caption = "1 track listed."
         case 1 where stations[0].isVideo == true: caption = "1 video found."
         case 1: caption = stations[0].isTrack == true ? "1 track found." : "1 stream found."
         case _ where entryWasFileIndex == true: caption = "\(count) tracks listed."
-        case _ where stations.contains(where: { $0.isVideo == true }): caption = "\(count) results found."
+        case _ where stations.allSatisfy({ $0.isTrack == true }): caption = "\(count) tracks found."
+        case _ where stations.contains(where: { $0.isVideo == true || $0.isTrack == true }): caption = "\(count) results found."
         default: caption = "\(count) streams found."
         }
         return caption + " Checked \(requests) \(requests == 1 ? "address" : "addresses")." +

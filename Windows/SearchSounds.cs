@@ -8,14 +8,37 @@ internal sealed class SearchSounds : IDisposable
     internal const string SearchResource = "StreamSift.Sounds.search.wav";
     internal const string DoneResource = "StreamSift.Sounds.done.wav";
     internal const string FailureResource = "StreamSift.Sounds.error.wav";
+    private const int RepeatIntervalMilliseconds = 2000;
     private readonly SoundPlayer? start = Load(SearchResource);
     private readonly SoundPlayer? done = Load(DoneResource);
     private readonly SoundPlayer? failure = Load(FailureResource);
+    private readonly System.Windows.Forms.Timer repeat = new() { Interval = RepeatIntervalMilliseconds };
+    private CancellationToken search;
     internal bool Enabled { get; set; } = true;
 
-    internal void SearchStarted() => Play(start);
+    internal SearchSounds()
+    {
+        repeat.Tick += (_, _) =>
+        {
+            if (search.IsCancellationRequested) SearchStopped();
+            else Play(start);
+        };
+    }
+
+    internal void SearchStarted(CancellationToken cancellation)
+    {
+        search = cancellation;
+        Play(start);
+        if (Enabled && start != null) repeat.Start();
+    }
+
+    internal void SearchStopped() => repeat.Stop();
     internal static string CompletionResource(int verifiedStreams) => verifiedStreams > 0 ? DoneResource : FailureResource;
-    internal void SearchCompleted(int verifiedStreams) => Play(CompletionResource(verifiedStreams) == DoneResource ? done : failure);
+    internal void SearchCompleted(int verifiedStreams)
+    {
+        SearchStopped();
+        Play(CompletionResource(verifiedStreams) == DoneResource ? done : failure);
+    }
 
     private void Play(SoundPlayer? player)
     {
@@ -42,6 +65,7 @@ internal sealed class SearchSounds : IDisposable
 
     public void Dispose()
     {
+        repeat.Dispose();
         foreach (var player in new[] { start, done, failure })
         {
             if (player == null) continue;

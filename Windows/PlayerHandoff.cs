@@ -119,7 +119,7 @@ internal static class PlaylistFile
         var first = name.Split('.')[0].TrimEnd().ToUpperInvariant();
         if (first is "CON" or "PRN" or "AUX" or "NUL" ||
             first.Length == 4 && (first.StartsWith("COM", StringComparison.Ordinal) || first.StartsWith("LPT", StringComparison.Ordinal)) &&
-            (char.IsAsciiDigit(first[3]) || first[3] is '\u00b9' or '\u00b2' or '\u00b3'))
+            first[3] is >= '0' and <= '9' or '\u00b9' or '\u00b2' or '\u00b3')
             return "_" + name;
         return name;
     }

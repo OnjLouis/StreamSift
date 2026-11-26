@@ -135,7 +135,11 @@ internal sealed class PreferencesDialog : Form
         {
             var path = Preferences.NormalizeFolder(folder.Text);
             if (string.Equals(path, Preferences.DefaultPlaylistFolder, StringComparison.OrdinalIgnoreCase)) path = null;
-            Value = new Preferences(sounds.Checked, updates.Checked, path, fallback.Checked, selected, customPlayerPath);
+            Value = Value with
+            {
+                SearchSounds = sounds.Checked, CheckUpdatesAtStartup = updates.Checked, PlaylistFolder = path,
+                AutomaticFallback = fallback.Checked, MediaPlayer = selected, CustomPlayerPath = customPlayerPath
+            };
             DialogResult = DialogResult.OK;
         }
         catch (Exception e) when (e is ArgumentException or NotSupportedException or IOException)

@@ -10,6 +10,38 @@ static string Argument(SearchMethod method) => method switch
     _ => "--json"
 };
 
+static ResultRow ScannerRow(Station row) => new(row.Name, row.Url.AbsoluteUri, row.Format, row.Bitrate,
+    row.FoundOn.AbsoluteUri, row.Listeners, row.IsVideo, row.IsHls, row.IsTrack, row.DateModified, row.DateModifiedLabel,
+    row.FileSizeBytes, row.FileSizeLabel, row.ScanTitle);
+
+if (args is ["--import-favourites"] or ["--export-favourites"])
+{
+    try
+    {
+        using var playlistInput = Console.OpenStandardInput();
+        using var playlistOutput = Console.OpenStandardOutput();
+        if (args[0] == "--import-favourites")
+        {
+            var imported = await FavouritePlaylist.ReadAsync(playlistInput);
+            var reply = new FavouriteReply(imported.Stations.Select(ScannerRow).ToArray(), imported.Skipped);
+            await JsonSerializer.SerializeAsync(playlistOutput, reply, ScannerJson.Default.FavouriteReply);
+        }
+        else
+        {
+            var data = await FavouritePlaylist.ReadDocumentAsync(playlistInput);
+            var entries = JsonSerializer.Deserialize(data, ScannerJson.Default.StationArray) ??
+                throw new InvalidDataException("No favourites were supplied.");
+            await playlistOutput.WriteAsync(FavouritePlaylist.Export(entries));
+        }
+        return 0;
+    }
+    catch (Exception error) when (error is IOException or InvalidDataException or JsonException or ArgumentException or UnauthorizedAccessException)
+    {
+        Console.Error.WriteLine("The favourites playlist could not be read or written.");
+        return 8;
+    }
+}
+
 SearchMethod? selected = args.FirstOrDefault() switch
 {
     "--json" => SearchMethod.Passive,
@@ -40,7 +72,7 @@ bool stationSearch = nameInput && method != SearchMethod.Browser;
 if (!hasAddress && !stationSearch) return 3;
 if (stationSearch) method = SearchMethod.Directory;
 
-using var client = PublicNetwork.CreateClient();
+using var client = PublicNetwork.CreateClient(readStreamTitles: true);
 if (method == SearchMethod.Browser && !fallback && !BrowserDiscovery.IsAvailable) return 4;
 using var cancellation = new CancellationTokenSource();
 using var termination = OperatingSystem.IsMacOS()
@@ -77,18 +109,21 @@ catch (Exception error) when (method == SearchMethod.Directory && (error is IOEx
     return 7;
 }
 var found = run.Result;
-var output = new Reply(found.Stations.Select(s => new ResultRow(s.Name, s.Url.AbsoluteUri, s.Format, s.Bitrate,
-    s.FoundOn.AbsoluteUri, s.Listeners, s.IsVideo, s.IsTrack, s.DateModified, s.DateModifiedLabel,
-    s.FileSizeBytes, s.FileSizeLabel)).ToArray(), found.Requests, found.Unreachable, found.LimitReached,
-    Argument(run.Method), run.Attempts, run.FailedMethods, found.EntryWasWebsite, found.EntryWasFileIndex);
+var output = new Reply(found.Stations.Select(ScannerRow).ToArray(), found.Requests, found.Unreachable, found.LimitReached,
+    Argument(run.Method), run.Attempts, run.FailedMethods, found.EntryWasWebsite, found.EntryWasFileIndex,
+    found.PreferListedOrder, found.ListingNotice);
 await JsonSerializer.SerializeAsync(Console.OpenStandardOutput(), output, ScannerJson.Default.Reply);
 return 0;
 
 internal sealed record ResultRow(string Name, string Url, string Format, int? Bitrate, string FoundOn, int? Listeners,
-    bool IsVideo, bool IsTrack, DateTime? DateModified, string? DateModifiedLabel, long? FileSizeBytes, string? FileSizeLabel);
+    bool IsVideo, bool IsHls, bool IsTrack, DateTime? DateModified, string? DateModifiedLabel, long? FileSizeBytes,
+    string? FileSizeLabel, string? ScanTitle);
+internal sealed record FavouriteReply(ResultRow[] Stations, int Skipped);
 internal sealed record Reply(ResultRow[] Stations, int Requests, int Unreachable, bool LimitReached, string Method, int Attempts, int FailedMethods,
-    bool EntryWasWebsite, bool EntryWasFileIndex);
+    bool EntryWasWebsite, bool EntryWasFileIndex, bool PreferListedOrder, string? ListingNotice);
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(Reply))]
+[JsonSerializable(typeof(FavouriteReply))]
+[JsonSerializable(typeof(Station[]))]
 internal sealed partial class ScannerJson : JsonSerializerContext;

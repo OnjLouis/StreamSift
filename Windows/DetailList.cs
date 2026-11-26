@@ -1,6 +1,6 @@
 namespace StreamSift;
 
-internal enum DetailKind { StreamAddress, FoundOn, Station, Format, Bitrate, Listeners, Selection, DateModified, FileSize }
+internal enum DetailKind { StreamAddress, FoundOn, Station, Format, Bitrate, Listeners, Selection, DateModified, FileSize, ScanTitle }
 internal enum DetailAction { Search = 1, OpenBrowser, Copy, ScanServer, SavePlaylist, Review }
 
 internal sealed record DetailRow(DetailKind Kind, string Label, string Value, Uri? Address = null,
@@ -28,6 +28,7 @@ internal sealed record DetailRow(DetailKind Kind, string Label, string Value, Ur
             new(DetailKind.Bitrate, "Bitrate", station.Bitrate is int rate ? $"{rate} kbps" : "not reported")
         };
         if (station.Listeners is int count) rows.Add(new(DetailKind.Listeners, "Listeners at scan", count.ToString()));
+        if (station.ScanTitle is string title) rows.Add(new(DetailKind.ScanTitle, "Playing", title));
         if (station.DateModifiedLabel is string modified) rows.Add(new(DetailKind.DateModified, "Date modified", modified));
         if (station.FileSizeLabel is string size) rows.Add(new(DetailKind.FileSize, "File size", size));
         if (selectedCount > 1) rows.Add(new(DetailKind.Selection, "Selection",

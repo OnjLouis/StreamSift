@@ -69,6 +69,30 @@ func selfTest() throws {
     let row = Station(name: "Lyd \u{e9}\nFM", url: "https://radio.example/stream", format: "MP3", bitrate: 320,
                       foundOn: "https://radio.example/")
     let quiet = Station(name: "Able", url: "https://radio.example/quiet", format: "AAC", bitrate: 48, foundOn: "")
+    let savedRadio = Station(name: "Lyd é FM", url: row.url, format: row.format, bitrate: row.bitrate, foundOn: row.foundOn)
+    var titledRadio = savedRadio
+    titledRadio.foundOn += "?source=fixture"
+    titledRadio.scanTitle = "Example song"
+    try require(titledRadio.listLabel(named: titledRadio.name).hasSuffix("Playing, Example song") &&
+                DetailRow.rows(for: titledRadio, selectedCount: 1).contains { $0.kind == .scanTitle && $0.label == "Playing" && $0.value == "Example song" } &&
+                Favourites.merge([], with: [titledRadio]).first?.foundOn == titledRadio.url &&
+                Favourites.merge([], with: [titledRadio]).first?.scanTitle == nil,
+                "Title snapshots are readable and Favourites retain only safe station data")
+    let savedTrack = Station(name: "Evening, café", url: "https://radio.example/test.mp2", format: "MP2", bitrate: nil,
+                             foundOn: row.foundOn, isTrack: true)
+    let savedFavourites = Favourites.merge([savedRadio], with: [row, savedRadio, savedTrack])
+    try Favourites.save(savedFavourites, to: defaults)
+    try require(Favourites.read(from: defaults) == [savedRadio, savedTrack] &&
+                Favourites.random(in: savedFavourites, avoiding: savedRadio.url) == savedTrack,
+                "Favourites persist and random avoids the previously played entry")
+    let favouritesPlaylist = root.appendingPathComponent("Favourites.m3u8")
+    try Favourites.exportPlaylist(savedFavourites, to: favouritesPlaylist)
+    let favouriteImport = try Favourites.importPlaylist(favouritesPlaylist)
+    try require(favouriteImport.skipped == 0 && favouriteImport.stations.map(\.name) == savedFavourites.map(\.name) &&
+                favouriteImport.stations.map(\.url) == savedFavourites.map(\.url) &&
+                favouriteImport.stations.map(\.format) == ["MP3", "MP2"] &&
+                favouriteImport.stations.map { $0.isTrack == true } == [false, true],
+                "Native scanner preserves names, URLs, formats and kinds across M3U8 transfer")
     let addressed = Station(name: "Example", url: "https://radio.example:9020/stream?token=fixture",
                             format: "MP3", bitrate: 128, foundOn: "https://radio.example/list", listeners: 0)
     let detail = DetailRow.rows(for: addressed, selectedCount: 2)

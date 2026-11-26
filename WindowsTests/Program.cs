@@ -30,15 +30,17 @@ foreach (var resource in new[] { SearchSounds.SearchResource, SearchSounds.DoneR
 {
     using var sound = typeof(SearchSounds).Assembly.GetManifestResourceStream(resource);
     Check(sound != null && sound.Length is > 16000 and < 28000, $"Search cue embedded: {resource}");
-    var header = new byte[12];
-    sound!.ReadExactly(header);
-    Check(header.AsSpan(0, 4).SequenceEqual("RIFF"u8) && header.AsSpan(8, 4).SequenceEqual("WAVE"u8), "WAV format.");
+    using var reader = new BinaryReader(sound!);
+    byte[] header = reader.ReadBytes(12);
+    Check(header.Length == 12 && header.AsSpan(0, 4).SequenceEqual("RIFF"u8) &&
+        header.AsSpan(8, 4).SequenceEqual("WAVE"u8), "WAV format.");
 }
 Check(SearchSounds.CompletionResource(0) == SearchSounds.FailureResource &&
       SearchSounds.CompletionResource(1) == SearchSounds.DoneResource,
     "Empty and failed searches use a different sound from successful searches.");
 using (var failureCue = typeof(SearchSounds).Assembly.GetManifestResourceStream(SearchSounds.FailureResource)!)
-    Check(Convert.ToHexString(SHA256.HashData(failureCue)) ==
+using (var sha = SHA256.Create())
+    Check(Convert.ToHexString(sha.ComputeHash(failureCue)) ==
         "50CC0C1F6E69064155691E6F58E2B2131568389BCB2C3BFC2FA57D71A14A9F83", "Original failure WAV is unmodified.");
 
 var prefsFolder = Path.Combine(directory, "prefs");
@@ -72,7 +74,10 @@ using (var saved = JsonDocument.Parse(File.ReadAllBytes(prefsFile)))
         "A selected custom player survives saving even if the executable is currently unavailable.");
 var settings = new Preferences(true, true, exportFolder, AutomaticFallback: true, MediaPlayer: PlayerChoice.Vlc);
 settings.Save(prefsFolder);
+Check(Preferences.Load(prefsFolder).ShowToolbar, "The toolbar is visible by default.");
 Check(Preferences.Load(prefsFolder) == settings && !Directory.Exists(exportFolder), "Saved preferences override the old marker without creating the export folder.");
+(settings with { ShowToolbar = false }).Save(prefsFolder);
+Check(!Preferences.Load(prefsFolder).ShowToolbar, "The toolbar visibility setting survives reopening the app.");
 (settings with { SearchSounds = false }).Save(prefsFolder);
 Check(Preferences.Load(prefsFolder) == (settings with { SearchSounds = false }) &&
     !Directory.EnumerateFiles(prefsFolder, "*.tmp").Any(), "Settings can be replaced without keeping temporary files.");
@@ -314,7 +319,7 @@ foreach (var address in new[] { "https://github.com/elsewhere/StreamSift/release
 
 var current = AppUpdate.Current;
 var next = new Version(current.Major, current.Minor, current.Build + 1);
-string tag = "v" + next;
+string tag = AppUpdate.TagPrefix + next;
 string asset = AppUpdate.AssetTemplate.Replace("{version}", next.ToString());
 string zip = Path.Combine(directory, asset);
 using (var archive = ZipFile.Open(zip, ZipArchiveMode.Create))
@@ -324,6 +329,20 @@ using (var archive = ZipFile.Open(zip, ZipArchiveMode.Create))
         writer.Write("New version " + file);
     }
 var signed = PackageSigner.Sign(zip, AppUpdate.Product, AppUpdate.Platform, next, rsa, policy);
+string otherPlatform = AppUpdate.Platform == "windows-x64" ? "windows7-x64" : "windows-x64";
+var otherPolicy = AppUpdate.Policy(key);
+otherPolicy.Platform = otherPlatform;
+Reject(() => PackageVerifier.VerifyManifest(signed.ManifestBytes, signed.Signature, otherPolicy, next),
+    "A signed update was accepted by the wrong Windows platform.");
+Check(AppUpdate.MatchesInstalledBuild(System.Diagnostics.FileVersionInfo.GetVersionInfo(typeof(AppUpdate).Assembly.Location), current),
+    "The signed updater accepts its own product and installed build metadata.");
+var stableStream = new Uri("https://audio.example/listen");
+var directoryStation = new Station("Directory station", stableStream, "MP3", null,
+    new Uri("https://radio.example/stations?token=fixture"), false);
+var savedFavourites = new FavouriteStore(prefsFolder);
+Check(savedFavourites.Toggle(directoryStation) && new FavouriteStore(prefsFolder).Items is
+    [{ FoundOn: var savedAddress }] && savedAddress == stableStream,
+    "Favourites save a stable playable link when the directory address is temporary.");
 var assets = new Dictionary<string, byte[]>
 {
     [asset] = File.ReadAllBytes(zip), [asset + ".json"] = signed.ManifestBytes,
@@ -335,10 +354,16 @@ using var client = new GitHubUpdates(api, TimeSpan.FromSeconds(5));
 var offer = await AppUpdate.CheckAsync(client, CancellationToken.None);
 Check(offer != null && offer.Version.ToString(3) == next.ToString(), "Fetched correct stable release family.");
 AppUpdate.CheckOfferAddresses(offer!);
-Check(GitHubUpdates.Select([new GitHubRelease { Tag = tag, Prerelease = true }], "v", AppUpdate.AssetTemplate, current) == null,
+Check(GitHubUpdates.Select([new GitHubRelease { Tag = tag, Prerelease = true }], AppUpdate.TagPrefix, AppUpdate.AssetTemplate, current) == null,
     "Ignored prerelease.");
-Check(GitHubUpdates.Select([new GitHubRelease { Tag = tag + "-preview", Draft = true }], "v", AppUpdate.AssetTemplate, current) == null,
+Check(GitHubUpdates.Select([new GitHubRelease { Tag = tag + "-preview", Draft = true }], AppUpdate.TagPrefix, AppUpdate.AssetTemplate, current) == null,
     "Ignored draft.");
+string otherTag = (AppUpdate.TagPrefix == "v" ? "win7-v" : "v") + next;
+Check(GitHubUpdates.Select([new GitHubRelease { Tag = otherTag }], AppUpdate.TagPrefix,
+    AppUpdate.AssetTemplate, current) == null, "The other Windows release family is ignored.");
+using var wrongChannel = new GitHubUpdates(new Fixture(assets, url.Replace(tag + "/", otherTag + "/"), tag), TimeSpan.FromSeconds(5));
+var wrongOffer = await AppUpdate.CheckAsync(wrongChannel, CancellationToken.None);
+Reject(() => AppUpdate.CheckOfferAddresses(wrongOffer!), "Accepted an asset hosted under the other channel.");
 
 var stage = Path.Combine(directory, "job");
 var downloaded = await client.DownloadAsync(offer!, policy, stage, CancellationToken.None);

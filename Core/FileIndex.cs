@@ -3,9 +3,9 @@ using System.Globalization;
 
 namespace StreamSift;
 
-internal sealed record FileIndex(IReadOnlyList<Station> Tracks, bool Truncated)
+internal sealed record FileIndex(IReadOnlyList<Station> Tracks, bool Truncated, bool PreferListedOrder = false, string? Notice = null)
 {
-    private const int TrackLimit = 512;
+    internal const int TrackLimit = 512;
     private const long Kibibyte = 1024, Mebibyte = Kibibyte * Kibibyte, Gibibyte = Mebibyte * Kibibyte, Tebibyte = Gibibyte * Kibibyte;
     private static readonly string[] DateFormats =
         ["yyyy-MM-dd HH:mm", "yyyy-MM-dd HH:mm:ss", "dd-MMM-yyyy HH:mm", "d MMMM yyyy, HH:mm", "d MMMM yyyy HH:mm"];
@@ -33,18 +33,7 @@ internal sealed record FileIndex(IReadOnlyList<Station> Tracks, bool Truncated)
             var file = Uri.UnescapeDataString(address.Segments[^1]);
             if (file.Contains('/') || file.Contains('\\') || file.Any(char.IsControl)) continue;
             var extension = Path.GetExtension(file);
-            var format = extension.ToLowerInvariant() switch
-            {
-                ".mp3" => "MP3",
-                ".mp2" => "MP2",
-                ".aac" => "AAC",
-                ".m4a" => "M4A",
-                ".flac" => "FLAC",
-                ".wav" => "WAV",
-                ".ogg" or ".oga" => "Ogg audio",
-                ".opus" => "Ogg Opus",
-                _ => null
-            };
+            var format = AudioFormat(file);
             if (format == null || !seen.Add(address)) continue;
             if (tracks.Count == TrackLimit) return new(tracks, true);
             var name = Extraction.Label(file[..^extension.Length]) ?? file;
@@ -66,6 +55,51 @@ internal sealed record FileIndex(IReadOnlyList<Station> Tracks, bool Truncated)
         return new(tracks, false);
     }
 
+    internal static string? AudioFormat(string path) => Path.GetExtension(path).ToLowerInvariant() switch
+    {
+        ".mp3" => "MP3",
+        ".mp2" => "MP2",
+        ".aac" => "AAC",
+        ".m4a" => "M4A",
+        ".flac" => "FLAC",
+        ".wav" => "WAV",
+        ".ogg" or ".oga" => "Ogg audio",
+        ".opus" => "Ogg Opus",
+        _ => null
+    };
+
+    internal static Station Track(Uri address, Uri source, string file, string format, string? title, long? bytes) =>
+        new(Extraction.Label(title) ?? Extraction.Label(Path.GetFileNameWithoutExtension(file)) ?? file,
+            address, format, null, source, false, IsTrack: true)
+        {
+            FileSizeBytes = bytes,
+            FileSizeLabel = bytes is long size ? FormatSize(size) : null
+        };
+
+    private static string FormatSize(long bytes)
+    {
+        (long scale, string unit) = bytes switch
+        {
+            >= Gibibyte => (Gibibyte, "GiB"),
+            >= Mebibyte => (Mebibyte, "MiB"),
+            >= Kibibyte => (Kibibyte, "KiB"),
+            1 => (1, "byte"),
+            _ => (1, "bytes")
+        };
+        return ((decimal)bytes / scale).ToString("0.##", CultureInfo.InvariantCulture) + " " + unit;
+    }
+
+    internal static bool TryFilePath(IEnumerable<string> segments, out string path)
+    {
+        path = "";
+        var parts = segments.ToArray();
+        if (parts.Length is 0 or > 32 || parts.Any(part =>
+            part.Length is 0 or > 255 || part is "." or ".." ||
+            part.Any(character => character is '/' or '\\' || char.IsControl(character)))) return false;
+        path = string.Join('/', parts.Select(Uri.EscapeDataString));
+        return path.Length <= 2048;
+    }
+
     private static (int Date, int Size) MetadataColumns(IElement table)
     {
         var headers = table.QuerySelector("thead tr") ?? table.QuerySelector("tr");
@@ -78,7 +112,7 @@ internal sealed record FileIndex(IReadOnlyList<Station> Tracks, bool Truncated)
     {
         text = text.Trim();
         int end = 0;
-        while (end < text.Length && (char.IsAsciiDigit(text[end]) || text[end] == '.')) end++;
+        while (end < text.Length && (Ascii.IsDigit(text[end]) || text[end] == '.')) end++;
         if (!decimal.TryParse(text.AsSpan(0, end), NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var number)) return null;
         // Apache and Nginx use binary units when the suffix is only one letter.
         (long scale, string unit) = text[end..].Trim().ToUpperInvariant() switch

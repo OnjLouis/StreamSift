@@ -22,10 +22,11 @@ struct LastResults: Codable {
         // An HLS server can embed a session identifier in an otherwise plain path.
         var seen = Set<String>()
         var safe: [Station] = []
-        for station in stations {
+        for var station in stations {
             guard station.format != "HLS", station.isVideo != true, station.isTrack != true,
                   safeText(station.name, limit: 512), safeText(station.format, limit: 32),
                   stableAddress(station.url), stableAddress(station.foundOn), seen.insert(station.url).inserted else { continue }
+            station.scanTitle = nil
             safe.append(station)
             if safe.count == maxStations { break }
         }
@@ -36,12 +37,12 @@ struct LastResults: Codable {
                            selection: restored.apply(safe).contains { $0.url == selection } ? selection : nil)
     }
 
-    private static func safeText(_ text: String, limit: Int) -> Bool {
+    static func safeText(_ text: String, limit: Int) -> Bool {
         !text.isEmpty && text.utf16.count <= limit &&
             !text.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
     }
 
-    private static func stableAddress(_ text: String) -> Bool {
+    static func stableAddress(_ text: String) -> Bool {
         guard safeText(text, limit: 2048), !text.contains(where: { "?#@\\".contains($0) }),
               let host = StreamPreview.address(text)?.host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")),
               let last = host.split(separator: ".").last, host.contains("."), !host.contains(":"),
