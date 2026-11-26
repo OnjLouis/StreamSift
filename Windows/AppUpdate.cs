@@ -116,6 +116,9 @@ internal static class AppUpdate
             if (IsJobName(jobName))
             {
                 var previousJob = Path.Combine(Root, jobName);
+                // Older update workers can leave the relaunched app in the staging directory.
+                if (string.Equals(Directory.GetCurrentDirectory(), previousJob, StringComparison.OrdinalIgnoreCase))
+                    Directory.SetCurrentDirectory(AppContext.BaseDirectory);
                 _ = Task.Run(async () =>
                 {
                     for (int attempt = 0; attempt < 20; attempt++)
@@ -160,7 +163,11 @@ internal static class AppUpdate
         {
             try
             {
-                var action = new ProcessStartInfo(restartPath) { UseShellExecute = false };
+                var action = new ProcessStartInfo(restartPath)
+                {
+                    WorkingDirectory = Path.GetDirectoryName(restartPath)!,
+                    UseShellExecute = false
+                };
                 action.ArgumentList.Add("--cleanup-update");
                 action.ArgumentList.Add(Path.GetFileName(job));
                 using var restarted = Process.Start(action) ?? throw new IOException("The program did not reopen.");
