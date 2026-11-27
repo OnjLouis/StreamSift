@@ -90,7 +90,8 @@ if (args.Length > 0)
     return;
 }
 
-int checks = 0;
+int checks = MobilePlaybackChecks.Run() + await MobilePlaybackChecks.CheckSearchHeartbeatAsync() +
+    await AndroidReleaseCheckChecks.RunAsync() + await TrackDownloadChecks.RunAsync() + await AndroidMediaInputChecks.RunAsync();
 void Require(bool condition, string message)
 {
     if (!condition) throw new Exception(message);
@@ -477,8 +478,9 @@ var directPodcast = await engine.FindAsync(new Uri(podcastFeed), CancellationTok
 Require(directPodcast.PreferListedOrder && directPodcast.Stations.Select(track => track.Url)
     .SequenceEqual(podcast.Stations.Select(track => track.Url)),
     "A direct RSS feed lists the same episode links as its podcast page.");
-Require(podcast.Stations.All(track => track.FoundOn.AbsoluteUri == podcastPage),
-    "Episodes retain the public podcast page as their source.");
+Require(podcast.Stations.All(track => track.FoundOn.AbsoluteUri == podcastPage &&
+    StreamSift.Mobile.SessionStore.CanSave(track)),
+    "Episodes discovered through a public podcast page can be restored or added to mobile Favourites.");
 handler.Text(podcastPage + "atom", """
     <feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Field notes</title>
     <link rel="enclosure" href="recording.opus" length="800" type="audio/ogg"/>

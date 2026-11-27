@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-android36.0</TargetFramework>
+    <SupportedOSPlatformVersion>26</SupportedOSPlatformVersion>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>StreamSift.Mobile</RootNamespace>
+    <AssemblyName>StreamSift</AssemblyName>
+    <ApplicationTitle>StreamSift</ApplicationTitle>
+    <ApplicationId>me.onj.streamsift</ApplicationId>
+    <ApplicationDisplayVersion>1.3.1</ApplicationDisplayVersion>
+    <ApplicationVersion>15</ApplicationVersion>
+    <AndroidPackageFormats>apk</AndroidPackageFormats>
+    <RuntimeIdentifiers>android-arm64;android-x64</RuntimeIdentifiers>
+    <AndroidUseAssemblyStore>false</AndroidUseAssemblyStore>
+    <EmbedAssembliesIntoApk>true</EmbedAssembliesIntoApk>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Core/Core.csproj" />
+    <PackageReference Include="NLayer" Version="3.0.1" />
+    <PackageReference Include="Xamarin.AndroidX.Core" Version="1.19.1" />
+    <PackageReference Include="Xamarin.AndroidX.Media3.ExoPlayer.Hls" Version="1.11.0" />
+    <Compile Include="../Windows/ResultView.cs" Link="ResultView.cs" />
+    <Compile Include="../iOS/SessionStore.cs;../iOS/PublicMediaResponse.cs;../iOS/TrackDownload.cs;../iOS/PrivacyNotice.cs" />
+    <Compile Include="../iOS/LiveAudioStream.cs;../iOS/LiveRetry.cs;../iOS/PlaybackTimers.cs;../iOS/SearchHeartbeat.cs" />
+    <AndroidAsset Include="../iOS/NLayer-LICENSE.txt" Link="NLayer-LICENSE.txt" />
+    <AndroidAsset Include="Media3-LICENSE.txt" />
+    <AndroidAsset Include="../AngleSharp-LICENSE.txt" Link="AngleSharp-LICENSE.txt" />
+    <AndroidResource Include="../Windows/Assets/search.wav;../Windows/Assets/done.wav;../Windows/Assets/error.wav"
+      Link="Resources/raw/%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

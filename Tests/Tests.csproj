@@ -5,5 +5,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
-  <ItemGroup><ProjectReference Include="../Core/Core.csproj" /></ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Core/Core.csproj" />
+    <Compile Include="../Android/AndroidReleaseCheck.cs;../Android/AndroidMediaInput.cs" />
+    <Compile Include="../iOS/LiveAudioStream.cs;../iOS/LiveRetry.cs;../iOS/PlaybackTimers.cs;../iOS/SearchHeartbeat.cs;../iOS/SessionStore.cs;../Windows/ResultView.cs" />
+    <Compile Include="../iOS/TrackDownload.cs;../iOS/PublicMediaResponse.cs" />
+  </ItemGroup>
 </Project>

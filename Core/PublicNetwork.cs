@@ -70,14 +70,24 @@ public static class PublicNetwork
 
     public static HttpClient CreateClient() => CreateClient(readStreamTitles: false);
 
-    public static HttpClient CreateClient(bool readStreamTitles)
+    public static HttpClient CreateClient(bool readStreamTitles) =>
+        CreateClient(readStreamTitles, DecompressionMethods.All);
+
+    public static HttpClient CreateByteRangeClient()
+    {
+        var client = CreateClient(false, DecompressionMethods.None);
+        client.DefaultRequestHeaders.AcceptEncoding.ParseAdd("identity");
+        return client;
+    }
+
+    private static HttpClient CreateClient(bool readStreamTitles, DecompressionMethods decompression)
     {
         var client = new HttpClient(new SocketsHttpHandler
         {
             AllowAutoRedirect = false,
             UseCookies = false,
             UseProxy = false,
-            AutomaticDecompression = DecompressionMethods.All,
+            AutomaticDecompression = decompression,
             ConnectTimeout = TimeSpan.FromSeconds(5),
             PooledConnectionLifetime = TimeSpan.FromMinutes(2),
             MaxResponseHeadersLength = 32,

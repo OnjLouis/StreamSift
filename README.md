@@ -29,6 +29,22 @@ and demo pages.
 
 Read the [Windows manual](Manual.html) or [Mac manual](Mac/Manual.html).
 
+### Android
+
+StreamSift runs on 64-bit devices with Android 8.0 or later. It plays public audio in the app,
+supports TalkBack, and keeps recent searches, favourites and playback
+position on the device. Import or export favourites as an M3U8 playlist
+from the Favourites screen.
+
+For updates, open **Settings**, then **Check for Updates**. If a newer
+version is available, open its GitHub release page, download the Android
+APK and open it to confirm the update in Android.
+
+If you tested a development build signed with a development key, export
+your favourites before removing it. Android requires a fresh install
+when moving from that development build to the public release. Removing
+the development build deletes its local search history and playback state.
+
 ### Search
 
 Normal scans do not execute site JavaScript. The optional Find with Browser

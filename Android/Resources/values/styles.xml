@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="playback_accent">#175980</color>
+    <color name="playback_on_accent">#FFFFFF</color>
+    <color name="player_surface">#F0F4F6</color>
+    <style name="StreamSiftTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:colorAccent">@color/playback_accent</item>
+        <item name="android:statusBarColor">#F0F4F6</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>
